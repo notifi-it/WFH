@@ -15,7 +15,9 @@ Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.8 (368x448, ESP32-S3R8, 8MB PSRAM, 1
 - The **board** owns the schedule, the clock, the event log, the prompting, the sound and the haptics. It is the product.
 - The **web app** is a viewer and a remote. It renders the same day from the same log and can log a completion, but it never schedules and never prompts.
 
-This was previously split into a browser-first phase and a hardware phase. That split meant building a browser scheduler with known-unfixable reliability problems — tab suspension, no iOS haptics, no away-from-desk reach — and then deleting it. The single-phase version skips the throwaway.
+This was previously split into a browser-first phase and a hardware phase. That split meant building a browser scheduler with known-unfixable reliability problems — tab suspension, no haptics on iOS — and then deleting it. The single-phase version skips the throwaway.
+
+The board sits on the desk and prompts the person sitting at it. It does not chase them elsewhere: no phone push, no notifications away from the desk. If you are not there, you are not there.
 
 **The one rule that keeps this coherent:** there is exactly one scheduler, and it runs on the board. Two schedulers writing the same log is survivable, because §3 dedupes. Two schedulers *chiming* is not. When the board is unreachable the web app degrades to a read-and-log client — it does not start prompting to fill the gap.
 
@@ -221,28 +223,24 @@ export const wasAwake = (awake: Awake, t: number): boolean =>
 
 The subtlety is `anchor`. §5.3's rule — an interval action done early resets its timer from the tap — means the slot grid for `stand` is not a fixed lattice; it bends every time you get ahead. Folding the anchor forward during the walk reproduces exactly the sequence the live scheduler produced, which is what makes the derived view agree with what the user actually saw on the board.
 
-### 3.3 Two implementations, one behaviour
+### 3.3 `derive` runs on the board only
 
-`derive` exists twice: in C for the board's own UI (and on boot, to rebuild state from the NVS log) and in TypeScript for the web app. That duplication is the single largest correctness risk in this design — two implementations of a fiddly walk, in two languages, that must agree exactly or the board and the laptop will show different numbers for the same day.
+An earlier draft had `derive` implemented twice — C for the board, TypeScript for the web app — with shared test fixtures to keep them honest. That is two implementations of a fiddly walk in two languages that must agree exactly, and it was the largest correctness risk in the design.
 
-**Mitigation: shared fixtures.** One directory of JSON cases, both test suites load it.
+**Simpler: only the board derives.** It sends the web app the finished `DayView` alongside the log, and the web app renders what it is given.
 
-```json
-// fixtures/derive/interval-done-early.json
-{
-  "name": "interval action done early re-anchors the next slot",
-  "settings": { "workStart": "09:00", "workEnd": "18:00" },
-  "now": 1723640400,
-  "log": { "version": 2, "date": "2026-08-14",
-           "events": [ { "action": "water", "kind": "done", "ts": 1723637400, "slot": 1723638120 } ],
-           "awake": [[1723633200, 1723640400]], "snoozedUntil": {} },
-  "expect": { "counts": { "water": 1 }, "missed": {}, "next": { "water": 1723640100 } }
-}
+```
+board:    SQLite ──► derive() ──► DayView ──┐
+                                            ├──► GET /state  {log, view, power}
+          SQLite ──────── DayLog ───────────┘
+web app:  render(view)          // no derive, no slot maths, no cadence logic
 ```
 
-Adding a case means adding a file. Neither implementation may be changed without both suites passing. If a third client ever appears, it inherits the fixtures for free.
+The rule this replaces was "ship facts, not conclusions, so the two can never disagree about what a miss is". Removing the second implementation achieves the same goal more directly — there is nothing left to disagree. The web app drops the slot walk, the cadence branching and the anchor logic entirely; it is a renderer.
 
-**The board's copy is authoritative** if they ever disagree in the field: the board is the writer and the thing making noise. The web app showing a different count is a web app bug.
+The log is still sent, for two reasons: it is small (~4KB), and it lets the web app show something sensible while the board is unreachable (§8.4). But it is never the thing that produces the numbers on screen.
+
+Fixtures still earn their place for the one remaining implementation — see §11.1.
 
 ### 3.4 Awake windows
 
@@ -265,43 +263,178 @@ void day_mark_awake(day_log_t *log, time_t now) {
 
 The array stays small — a normal day is one to five windows — because extension mutates the last entry rather than appending. `AWAKE_MAX` of 32 is generous; if it ever fills, stop extending rather than wrapping, since a lost window costs at most a few phantom misses while a wrapped one corrupts the day.
 
-### 3.5 Persistence (NVS)
+### 3.5 Persistence — SQLite
 
-The board's store. One blob per day, rewritten on each event — at ~4KB and ~30 events a day this is far below anything flash wear makes interesting.
+The board's store is a SQLite database on a LittleFS partition. The full rationale is in §13; the short version is that the model from §3.1 *is* a table, and SQL expresses it more plainly than hand-rolled blob packing does.
+
+**The schema is the data model.** Reading it should tell you everything §3.1 says.
+
+```sql
+-- firmware/main/schema.sql  (embedded in the binary, run at every boot)
+
+CREATE TABLE IF NOT EXISTS events (
+  id      TEXT PRIMARY KEY,        -- uuid v4
+  day     TEXT NOT NULL,           -- 'YYYY-MM-DD', local time
+  action  TEXT NOT NULL,           -- 'water', 'stand', …
+  kind    TEXT NOT NULL CHECK (kind IN ('done', 'skip')),
+  ts      INTEGER NOT NULL,        -- epoch seconds: when the user tapped
+  slot    INTEGER NOT NULL,        -- epoch seconds: which slot this answers
+  source  TEXT NOT NULL,           -- 'board' | 'web'  (diagnostic only)
+
+  -- One answer per slot. This single line replaces every dedupe check in
+  -- the codebase: retries, double-taps, and the web app and the board
+  -- logging the same prompt all collapse here.
+  UNIQUE (action, slot)
+);
+
+CREATE INDEX IF NOT EXISTS events_day ON events (day);
+
+-- When the board was awake and able to prompt. A slot outside every window
+-- was never asked about, so it can never be a miss. See §3.1.
+CREATE TABLE IF NOT EXISTS awake (
+  day     TEXT NOT NULL,
+  start   INTEGER NOT NULL,
+  fin     INTEGER NOT NULL,
+  PRIMARY KEY (day, start)
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+  key     TEXT PRIMARY KEY,
+  value   TEXT NOT NULL
+);
+```
+
+**Opening it.** The ESP32 port needs a VFS backed by a filesystem partition; LittleFS is the better choice over FATFS here for its wear levelling and its tolerance of unclean shutdowns, which a battery-powered device will produce.
 
 ```c
-static esp_err_t day_persist(const day_log_t *log) {
-    nvs_handle_t h;
-    ESP_ERROR_CHECK(nvs_open("wfh", NVS_READWRITE, &h));
-    char key[16];
-    snprintf(key, sizeof(key), "d%s", log->date);        // "d2026-08-14"
-    esp_err_t err = nvs_set_blob(h, key, log, day_log_size(log));
-    if (err == ESP_OK) err = nvs_commit(h);              // commit before returning
-    nvs_close(h);
-    return err;
+// firmware/main/store.c
+static sqlite3 *g_db;
+
+esp_err_t store_open(void) {
+    esp_vfs_littlefs_conf_t fs = {
+        .base_path = "/fs", .partition_label = "storage", .format_if_mount_failed = true,
+    };
+    ESP_ERROR_CHECK(esp_vfs_littlefs_register(&fs));
+
+    if (sqlite3_open("/fs/wfh.db", &g_db) != SQLITE_OK) {
+        ESP_LOGE(TAG, "open failed: %s", sqlite3_errmsg(g_db));
+        return ESP_FAIL;
+    }
+
+    // WAL keeps a power cut mid-write from corrupting the database: the
+    // last committed transaction survives and the partial one is discarded.
+    sqlite3_exec(g_db, "PRAGMA journal_mode=WAL;",   NULL, NULL, NULL);
+    sqlite3_exec(g_db, "PRAGMA synchronous=FULL;",   NULL, NULL, NULL);
+    sqlite3_exec(g_db, "PRAGMA foreign_keys=ON;",    NULL, NULL, NULL);
+    sqlite3_exec(g_db, SCHEMA_SQL, NULL, NULL, NULL);   // CREATE IF NOT EXISTS
+    return ESP_OK;
 }
 ```
 
-Persist synchronously on every event, before the UI advances. A completion that is acknowledged on screen but lost to a power cut is the one failure this design must not have. Prune to the last 14 days on boot.
+`synchronous=FULL` costs a flush per write. At ~30 writes a day that is free, and it is what makes "the screen said Done, so it is recorded" true across a battery cut.
 
-### 3.6 Merge
+**Writing an event** is one statement. Note there is no dedupe code — `INSERT OR IGNORE` against the `UNIQUE` constraint does it, and `sqlite3_changes` tells us whether the row was new.
 
-The web app can log while the board is unreachable (§8.3), so the two logs must reconcile. Because every event carries a unique `(action, slot)`, union *is* the merge — commutative, idempotent, order-independent.
+```c
+// Returns true if this was a new event, false if we already had it.
+bool store_add_event(const log_event_t *ev) {
+    static const char *SQL =
+        "INSERT OR IGNORE INTO events (id, day, action, kind, ts, slot, source)"
+        " VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7);";
+
+    sqlite3_stmt *st;
+    sqlite3_prepare_v2(g_db, SQL, -1, &st, NULL);
+    sqlite3_bind_text(st, 1, ev->id,                  -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 2, day_key(ev->ts),         -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(st, 3, ACTIONS[ev->action].id,  -1, SQLITE_STATIC);
+    sqlite3_bind_text(st, 4, ev->kind == KIND_DONE ? "done" : "skip", -1, SQLITE_STATIC);
+    sqlite3_bind_int64(st, 5, ev->ts);
+    sqlite3_bind_int64(st, 6, ev->slot);
+    sqlite3_bind_text(st, 7, ev->source == SOURCE_BOARD ? "board" : "web", -1, SQLITE_STATIC);
+
+    int rc = sqlite3_step(st);
+    sqlite3_finalize(st);
+
+    if (rc != SQLITE_DONE) { ESP_LOGE(TAG, "insert: %s", sqlite3_errmsg(g_db)); return false; }
+    return sqlite3_changes(g_db) > 0;
+}
+```
+
+**Reading a day back** into the struct `derive` walks:
+
+```c
+void store_load_day(const char *day, day_log_t *out) {
+    out->events_len = 0;
+    out->awake_len  = 0;
+
+    sqlite3_stmt *st;
+    sqlite3_prepare_v2(g_db,
+        "SELECT action, kind, ts, slot FROM events WHERE day = ?1 ORDER BY ts;",
+        -1, &st, NULL);
+    sqlite3_bind_text(st, 1, day, -1, SQLITE_STATIC);
+
+    while (sqlite3_step(st) == SQLITE_ROW && out->events_len < EVENTS_MAX) {
+        log_event_t *e = &out->events[out->events_len++];
+        e->action = action_from_id((const char *)sqlite3_column_text(st, 0));
+        e->kind   = strcmp((const char *)sqlite3_column_text(st, 1), "done") == 0
+                    ? KIND_DONE : KIND_SKIP;
+        e->ts     = sqlite3_column_int64(st, 2);
+        e->slot   = sqlite3_column_int64(st, 3);
+    }
+    sqlite3_finalize(st);
+
+    sqlite3_prepare_v2(g_db,
+        "SELECT start, fin FROM awake WHERE day = ?1 ORDER BY start;", -1, &st, NULL);
+    sqlite3_bind_text(st, 1, day, -1, SQLITE_STATIC);
+    while (sqlite3_step(st) == SQLITE_ROW && out->awake_len < AWAKE_MAX) {
+        out->awake[out->awake_len++] = (awake_win_t){
+            .start = sqlite3_column_int64(st, 0),
+            .fin   = sqlite3_column_int64(st, 1),
+        };
+    }
+    sqlite3_finalize(st);
+}
+```
+
+**Awake windows** get an upsert, because the tick extends the current window every second and we do not want a row per second:
+
+```c
+void store_mark_awake(time_t now) {
+    static const char *SQL =
+        "INSERT INTO awake (day, start, fin) VALUES (?1, ?2, ?2)"
+        // Extend the open window if the last tick was recent; a longer gap
+        // means the board was off, so we let a new row be inserted instead.
+        " ON CONFLICT (day, start) DO UPDATE SET fin = ?2;";
+    ...
+}
+```
+
+The board holds today's `start` in RAM so it knows which row to update; on boot, or after a gap longer than `AWAKE_GAP_SEC`, it starts a new one. That gap rule is the whole of §3.4 and is unchanged by the move to SQL.
+
+**Retention** is one statement on boot instead of a key-scanning prune:
+
+```sql
+DELETE FROM events WHERE day < date('now', 'localtime', '-400 days');
+DELETE FROM awake  WHERE day < date('now', 'localtime', '-400 days');
+```
+
+400 days rather than 14: SQLite makes keeping history nearly free, and a year plus a margin is what makes §13's queries possible later without a migration.
+
+### 3.6 Reconciling the web app
+
+There is one writer of record — the board — so there is no merge algorithm to write. When the web app is offline it holds unsent taps in an outbox and replays them on reconnect. The `UNIQUE (action, slot)` constraint absorbs whatever arrives twice.
 
 ```ts
-export function merge(a: DayLog, b: DayLog): DayLog {
-  const byKey = new Map<string, LogEvent>();
-  for (const e of [...a.events, ...b.events]) byKey.set(`${e.action}@${e.slot}`, e);
-  return {
-    ...a,
-    events: [...byKey.values()].sort((x, y) => x.ts - y.ts),
-    awake: mergeWindows([...a.awake, ...b.awake]),
-    snoozedUntil: maxPerKey(a.snoozedUntil, b.snoozedUntil),
-  };
+// The entire offline story. Replay is safe at any multiplicity.
+async function flushOutbox(board: Backend) {
+  for (const ev of [...outbox]) {
+    await board.log(ev);        // INSERT OR IGNORE on the board
+    outbox.remove(ev);
+  }
 }
 ```
 
-Note that only the *board* contributes awake windows in practice. The web app being open says nothing about whether the user was prompted, so it must never write one — a laptop open at 03:00 must not turn the night into missed slots.
+Only the board writes `awake` rows. A browser tab being open says nothing about whether the user was prompted, and a laptop left open at 03:00 must not turn the night into missed slots.
 
 ---
 
@@ -310,44 +443,55 @@ Note that only the *board* contributes awake windows in practice. The web app be
 Four FreeRTOS tasks. Everything that mutates the log funnels through one of them.
 
 ```
-┌────────────┐   due actions   ┌────────────┐
-│ scheduler  │ ──────────────► │    ui      │  LVGL, touch, screens
-│  1 Hz tick │                 │  (LVGL tz) │
-└─────┬──────┘                 └─────┬──────┘
-      │                              │ on_done / on_skip
-      │  day_mark_awake              ▼
-      │                     ┌─────────────────┐
-      └────────────────────►│ day_apply_event │  ← the ONLY mutation path
+┌─────────────┐  due actions  ┌─────────────┐
+│  scheduler  │ ────────────► │     ui      │  LVGL: grid, prompts, stretches
+│   1 Hz tick │               │ touch + key │
+└──────┬──────┘               └──────┬──────┘
+       │                             │ input_done() / input_skip()   §7.4
+       │ store_mark_awake            ▼
+       │                    ┌─────────────────┐      ┌──────────┐
+       └───────────────────►│ day_apply_event │─────►│ feedback │ sound + haptic
+                            │  ← ONLY writer  │      └──────────┘
                             └────────┬────────┘
-        ┌────────────┐               │            ┌──────────┐
-        │  httpd     │───────────────┘            │  notify  │
-        │ /state /ws │◄── ws_broadcast ───────────│ notifi.it│
-        └────────────┘                            └──────────┘
+                                     │
+                    ┌────────────────┼────────────────┐
+                    ▼                ▼                ▼
+              ┌──────────┐    ┌────────────┐   ┌────────────┐
+              │  SQLite  │    │ derive()   │   │  ws_broad- │
+              │ /fs/wfh  │    │ → DayView  │   │  cast_state│──► browsers
+              └──────────┘    └────────────┘   └────────────┘
+                    ▲
+                    │  POST /event
+              ┌─────┴──────┐
+              │   httpd    │  /state  /event  /ws  /  (web app)
+              └────────────┘
 ```
 
 `day_apply_event` is the only function that writes the log. The touch handler calls it, `POST /event` calls it, and nothing else does. That single choke point is what makes a board tap and a browser tap genuinely the same operation rather than two code paths that happen to look alike.
 
 ```c
-// The choke point. Idempotent on (action, slot).
-esp_err_t day_apply_event(day_log_t *log, const log_event_t *ev) {
-    for (size_t i = 0; i < log->events_len; i++) {
-        if (log->events[i].action == ev->action && log->events[i].slot == ev->slot) {
-            return ESP_OK;                     // already have it; not an error
-        }
-    }
-    if (log->events_len >= EVENTS_MAX) return ESP_ERR_NO_MEM;
-    log->events[log->events_len++] = *ev;
+// firmware/main/day.c
+// The choke point. Everything that logs an event comes through here.
+// Returns true if this was new, false if we already had it.
+bool day_apply_event(const log_event_t *ev) {
+    bool is_new = store_add_event(ev);      // INSERT OR IGNORE, §3.5
 
-    esp_err_t err = day_persist(log);           // durable before we acknowledge
-    if (err != ESP_OK) return err;
+    if (!is_new) return false;              // duplicate: nothing changed, stay quiet
 
-    view_invalidate();                          // recompute on next render
-    ws_broadcast_state();                       // every connected browser updates
-    return ESP_OK;
+    store_load_day(day_key(ev->ts), &g_day); // refresh the in-RAM copy
+    derive(&g_day, time(NULL), &g_settings, &g_view);
+    ui_refresh();                            // redraw tiles from the new view
+    ws_broadcast_state();                    // push to every connected browser
+    return true;
 }
 ```
 
-Returning `ESP_OK` for a duplicate rather than an error matters: a web client retrying a request it never saw the response to must not get a failure for an event that landed.
+Two properties this gives everything upstream of it:
+
+- **A duplicate is not an error.** A web client retrying a request whose response it never saw, or a user tapping Done twice, gets a quiet no-op rather than a failure or a double count.
+- **The screen and the socket update from the same place.** There is no path where the board's tiles and the browser's tiles come from different computations, because both are driven by the single `derive` that runs here.
+
+Reloading the whole day from SQLite after each insert rather than patching the in-RAM struct is deliberate: it is a few hundred microseconds, it happens ~30 times a day, and it guarantees the RAM copy can never drift from what is actually stored.
 
 ---
 
@@ -400,11 +544,11 @@ static void scheduler_task(void *arg) {
         time_t now = time(NULL);
 
         if (!day_is_today(&g_day, now)) {        // rollover, §11.2
-            day_persist(&g_day);
+            store_close_awake(now);
             day_init(&g_day, now);
         }
 
-        day_mark_awake(&g_day, now);             // §3.4 — the same write that
+        store_mark_awake(now);                   // §3.4 — the same write that
                                                  // makes misses correct
 
         if (in_working_hours(now, &g_settings)) {
@@ -426,24 +570,19 @@ The tick writes no tallies and rolls nothing forward — `derive` owns all of th
 
 ### 5.3 Completing early
 
+Logging is just an append (§7.4's `input_done`). The interval/fixed asymmetry lives entirely in `derive`'s `anchor` and nowhere else: drinking water at 11:20 pushes the next glass to 12:05, while eating lunch at 12:40 leaves the 13:00 slot exactly where it was. Having that branch in one place rather than at every call site is the point.
+
 ```c
-void on_done(action_id_t id) {
-    time_t now = time(NULL);
-    log_event_t ev = {
-        .action = id,
-        .kind   = KIND_DONE,
-        .ts     = now,                       // PCF85063-backed; correct after reboot
-        .slot   = current_or_next_slot(id),  // the slot being answered
-        .source = SOURCE_BOARD,
-    };
-    uuid_v4(ev.id);
-    day_apply_event(&g_day, &ev);
+/** Which slot is this tap answering? The due one if there is one, else the
+ *  next upcoming one — which is what makes a grid tile tap ("I just drank
+ *  one") work through the same path as answering a prompt. */
+time_t current_or_next_slot(action_id_t id) {
+    for (int i = 0; i < g_view.n_due; i++) {
+        if (g_view.due[i] == id) return g_view.due_slot[i];
+    }
+    return g_view.next[id];
 }
 ```
-
-The interval/fixed asymmetry lives entirely in `derive`'s `anchor`, not here: drinking water at 11:20 pushes the next glass to 12:05, while eating lunch at 12:40 leaves the 13:00 slot exactly where it was. Having that branch in one place rather than at every call site is the point.
-
-`current_or_next_slot` resolves to the due slot if one is due, and to the next upcoming slot otherwise — which is what makes tapping a tile on the grid ("I just drank one, credit me") work through the same path as answering a prompt.
 
 ---
 
@@ -550,32 +689,126 @@ static void on_done_cb(lv_event_t *e) {
 }
 ```
 
-### 7.4 Physical key
+### 7.4 Inputs
 
-One press = Done on the current prompt, which is what you want when the prompt is "stand up" and you are already standing.
+Four ways to answer a prompt, and **all four end at the same two functions**. Nothing else in the firmware writes an event.
+
+```
+touch: Done button   ─┐
+touch: grid tile     ─┤
+physical key         ─┼──► input_done(action)  ──► day_apply_event()
+IMU tap (optional)   ─┘                              ▲
+                                                     │
+web app: POST /event ────────────────────────────────┘
+```
 
 ```c
+// firmware/main/input.c — every input path lands here
+
+void input_done(action_id_t id) {
+    log_event_t ev = {
+        .action = id,
+        .kind   = KIND_DONE,
+        .ts     = time(NULL),                  // RTC-backed; right after a reboot
+        .slot   = current_or_next_slot(id),    // which slot this answers
+        .source = SOURCE_BOARD,
+    };
+    uuid_v4(ev.id);
+
+    if (day_apply_event(&ev)) {                // false = we already had it
+        feedback_play(CUE_SUCCESS);            // sound + haptic, §9
+    }
+    queue_advance();                           // next card, or back to the grid
+    idle_timer_reset();                        // screen goes dark 20s from now
+}
+
+void input_skip(action_id_t id) {
+    log_event_t ev = { .action = id, .kind = KIND_SKIP, .ts = time(NULL),
+                       .slot = current_or_next_slot(id), .source = SOURCE_BOARD };
+    uuid_v4(ev.id);
+    day_apply_event(&ev);
+    feedback_play(CUE_READY);
+    queue_advance();
+    idle_timer_reset();
+}
+```
+
+Gating the cue on `day_apply_event`'s return is a small thing that matters in use: a double-tap on Done should chime once, not twice. The second tap is deduplicated by the `UNIQUE` constraint, and the silence tells the user it did not count twice.
+
+**Touch — prompt buttons.** LVGL callbacks are one line each.
+
+```c
+static void on_done_cb(lv_event_t *e)  { input_done((action_id_t)(intptr_t)lv_event_get_user_data(e)); }
+static void on_skip_cb(lv_event_t *e)  { input_skip((action_id_t)(intptr_t)lv_event_get_user_data(e)); }
+static void on_delay_cb(lv_event_t *e) { queue_delay_all(time(NULL)); feedback_play(CUE_READY); }
+static void on_close_cb(lv_event_t *e) { queue_dismiss(); }
+```
+
+**Touch — grid tiles.** Tapping a tile logs that action with no prompt, which is the "I just drank a glass, credit me" path. Same function, so it re-anchors the timer exactly as answering a prompt would.
+
+```c
+static void on_tile_cb(lv_event_t *e) {
+    action_id_t id = (action_id_t)(intptr_t)lv_event_get_user_data(e);
+    if (screen_is_dark()) { wake_screen(); return; }    // first touch only wakes
+    input_done(id);
+    tile_flash(id);                                      // brief tint pulse
+}
+```
+
+**Physical key.** One press = Done on the current prompt, which is what you want when the prompt is "stand up" and you are already standing — you can answer it without looking.
+
+```c
+// firmware/main/key.c
+#define KEY_GPIO        GPIO_NUM_0     // verify against your board revision
+#define DEBOUNCE_US     250000         // 250ms
+#define LONG_PRESS_US   800000         // 800ms
+
 static void key_task(void *arg) {
-    int64_t last = 0;
+    int64_t pressed_at = 0;
+    bool    was_down   = false;
+
     for (;;) {
-        if (gpio_get_level(PIN_BTN) == 0) {               // active low — verify
-            int64_t now = esp_timer_get_time();
-            if (now - last > 250000) {                     // 250ms debounce
-                last = now;
-                if (screen_is_dark())      wake_screen();  // first press wakes only
-                else if (g_queue_len > 0)  on_done_current();
+        bool down = gpio_get_level(KEY_GPIO) == 0;      // active low — verify
+        int64_t now = esp_timer_get_time();
+
+        if (down && !was_down) {                        // edge: press
+            pressed_at = now;
+        } else if (!down && was_down) {                 // edge: release
+            int64_t held = now - pressed_at;
+            if (held > DEBOUNCE_US) {
+                if (screen_is_dark()) {
+                    wake_screen();                      // first press only wakes
+                } else if (held > LONG_PRESS_US) {
+                    queue_delay_all(time(NULL));        // hold = delay all 15
+                    feedback_play(CUE_READY);
+                } else if (g_queue_len > 0) {
+                    input_done(g_queue[0]);             // tap = done
+                }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(20));
+        was_down = down;
+        vTaskDelay(pdMS_TO_TICKS(20));                  // 50Hz poll is plenty
     }
 }
 ```
 
-The wake-then-answer split matters: a single press that both lights the panel and logs a completion means every accidental brush marks water as drunk. First press wakes, second press commits.
+The wake-then-answer split matters: a single press that both lights the panel and logs a completion means every accidental brush marks water as drunk. First press wakes, second press commits. Acting on *release* rather than press is what makes the long-press variant possible without a second button.
 
-**Check the touch controller part and the key GPIOs against the Waveshare schematic for your board revision** rather than trusting the numbers here — the AMOLED boards have changed touch parts between revisions, and the BOOT key is shared with strapping on some layouts.
+**Check the touch controller part and the key GPIO against the Waveshare schematic for your board revision** rather than trusting the numbers here — the AMOLED boards have changed touch parts between revisions, and the BOOT key is shared with strapping on some layouts, which will bite you at flash time.
 
-**Tap-to-answer via the IMU** is worth prototyping as a third input: the QMI8658 has tap detection, so a knock on the desk beside the board could answer the current prompt without reaching for it — genuinely nice for "stand break". It needs a real false-positive threshold before it goes anywhere near `day_apply_event`. Prototype behind a setting, default off.
+**IMU tap (optional, default off).** The QMI8658 has tap detection, so a knock on the desk beside the board could answer the current prompt without reaching for it — genuinely nice for "stand break", since you are already moving.
+
+```c
+static void imu_tap_isr(void *arg) {
+    // Only ever answers a prompt that is already on screen. A tap must never
+    // be able to log something the user was not being asked about — the
+    // false-positive rate on desk knocks is far too high for that.
+    if (g_queue_len == 0 || !g_settings.imu_tap) return;
+    xQueueSendFromISR(g_input_q, &(input_msg_t){ .kind = INPUT_TAP }, NULL);
+}
+```
+
+Prototype it behind the setting and keep the guard: an IMU tap can only answer, never originate.
 
 ### 7.5 Stretch flow
 
@@ -591,20 +824,53 @@ Abandoning the set part-way logs a `skip`, not a partial `done` — a half-finis
 
 A viewer and a remote. It renders `DayView` from the board's `DayLog` using the same `derive`, and it can log a completion. **It has no scheduler and raises no prompts.**
 
-### 8.1 API
+### 8.1 The protocol
+
+Three endpoints and one socket. Everything is JSON; nothing is versioned beyond the `version` field in the payload, because both ends ship together.
+
+| | | |
+|---|---|---|
+| `GET /state` | → `{ log, view, power }` | full snapshot, used once on load |
+| `POST /event` | `{ action, kind, ts, slot }` → `{ ok, applied }` | log a completion |
+| `GET /ws` | ← `{ type: 'state', … }` | push on every change |
+| `GET /` | → the web app itself | static files from LittleFS |
+
+**The snapshot.** One shape, sent by both `GET /state` and every WebSocket push, so the client has exactly one code path for "here is the world".
+
+```jsonc
+{
+  "type": "state",
+  "log":  { "version": 2, "date": "2026-08-14", "events": [ … ], "awake": [ … ] },
+  "view": {                                  // derived on the board, §3.3
+    "counts":  { "water": 3, "stand": 4 },
+    "skipped": { "stand": 1 },
+    "missed":  { "water": 2 },
+    "next":    { "water": 1723648800 },
+    "due":     ["water"]
+  },
+  "power": { "battPct": 82, "charging": true, "onBattery": false },
+  "now": 1723645200                          // board clock, for countdown skew
+}
+```
+
+`now` matters more than it looks: the browser renders countdowns from `view.next`, and if the laptop's clock is two minutes off the board's, every tile shows the wrong number. The client stores `skew = now_board - now_browser` once per snapshot and applies it to every countdown.
+
+### 8.2 Board side
 
 ```c
-// GET /state → the DayLog verbatim. Facts, not conclusions.
+// firmware/main/api.c
+static httpd_handle_t g_server;
+
+// ── GET /state ───────────────────────────────────────────────────────────
 static esp_err_t state_get(httpd_req_t *req) {
-    char *json = day_log_to_json(&g_day);
+    char *json = snapshot_json();          // log + view + power + now
     httpd_resp_set_type(req, "application/json");
-    httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
     httpd_resp_sendstr(req, json);
     free(json);
     return ESP_OK;
 }
 
-// POST /event {"action":"water","kind":"done","ts":…,"slot":…,"source":"web"}
+// ── POST /event ──────────────────────────────────────────────────────────
 static esp_err_t event_post(httpd_req_t *req) {
     char buf[256];
     int n = httpd_req_recv(req, buf, MIN(req->content_len, sizeof(buf) - 1));
@@ -616,41 +882,182 @@ static esp_err_t event_post(httpd_req_t *req) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad event");
         return ESP_OK;
     }
-    day_apply_event(&g_day, &ev);            // same choke point as the touch handler
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    ev.source = SOURCE_WEB;
+
+    bool applied = day_apply_event(&ev);   // same function the touch handler calls
+
+    // `applied: false` means we already had this event — a retry, or the user
+    // tapped both the board and their laptop. Still a 200: the client asked
+    // for the event to exist, and it does.
+    char resp[64];
+    snprintf(resp, sizeof(resp), "{\"ok\":true,\"applied\":%s}", applied ? "true" : "false");
+    return httpd_resp_sendstr(req, resp);
 }
 ```
 
-Shipping the log rather than the derived view means the two can never disagree about what a miss is. It also keeps the payload small — a full day is ~30 events, well under 4KB.
+**The WebSocket.** ESP-IDF's `esp_http_server` handles the upgrade; we keep a small table of connected sockets and write the snapshot to each on change.
 
-`GET /ws` pushes the log on every change, so the browser updates the instant someone taps the board.
+```c
+// ── GET /ws ──────────────────────────────────────────────────────────────
+#define WS_MAX_CLIENTS 4
+static int g_ws_fds[WS_MAX_CLIENTS];
 
-Discovery via mDNS at `wfh.local`, so no hardcoded IP.
+static esp_err_t ws_handler(httpd_req_t *req) {
+    if (req->method == HTTP_GET) {         // the handshake — no payload yet
+        int fd = httpd_req_to_sockfd(req);
+        ws_client_add(fd);
+        ESP_LOGI(TAG, "ws client %d connected", fd);
+        ws_send_snapshot(fd);              // send current state immediately
+        return ESP_OK;
+    }
+    return ESP_OK;                          // we never expect inbound frames
+}
 
-**Serve the web app from the board.** `http://wfh.local` to `http://wfh.local` avoids the mixed-content block that would otherwise stop an HTTPS-hosted page from talking to the board over plain HTTP. The built bundle goes in a SPIFFS partition and is served by the same `esp_http_server`; at a few hundred KB it fits comfortably in 16MB of flash alongside the firmware.
+static void ws_client_add(int fd) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (g_ws_fds[i] == fd || g_ws_fds[i] == 0) { g_ws_fds[i] = fd; return; }
+    }
+    ESP_LOGW(TAG, "ws client table full, dropping %d", fd);
+}
 
-### 8.2 Client
+static void ws_send_snapshot(int fd) {
+    char *json = snapshot_json();
+    httpd_ws_frame_t frame = {
+        .type = HTTPD_WS_TYPE_TEXT,
+        .payload = (uint8_t *)json,
+        .len = strlen(json),
+    };
+    // Queue rather than send inline: this is called from the scheduler and
+    // the touch handler, and neither should block on a slow client.
+    if (httpd_ws_send_frame_async(g_server, fd, &frame) != ESP_OK) {
+        ws_client_remove(fd);              // client went away
+    }
+    free(json);
+}
+
+// Called by day_apply_event (§4) and by the power-event handler (§10).
+void ws_broadcast_state(void) {
+    for (int i = 0; i < WS_MAX_CLIENTS; i++) {
+        if (g_ws_fds[i]) ws_send_snapshot(g_ws_fds[i]);
+    }
+}
+```
+
+`httpd_ws_send_frame_async` rather than the blocking form is the important detail. `ws_broadcast_state` is called from inside `day_apply_event`, which runs on the LVGL task in response to a touch — a blocking write to a stalled client would freeze the UI mid-tap.
+
+**Registration and discovery:**
+
+```c
+void api_start(void) {
+    httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
+    cfg.max_open_sockets = WS_MAX_CLIENTS + 3;   // sockets + room for plain GETs
+    ESP_ERROR_CHECK(httpd_start(&g_server, &cfg));
+
+    httpd_uri_t routes[] = {
+        { .uri = "/state", .method = HTTP_GET,  .handler = state_get  },
+        { .uri = "/event", .method = HTTP_POST, .handler = event_post },
+        { .uri = "/ws",    .method = HTTP_GET,  .handler = ws_handler, .is_websocket = true },
+        { .uri = "/*",     .method = HTTP_GET,  .handler = static_get  },  // the web app
+    };
+    for (int i = 0; i < 4; i++) httpd_register_uri_handler(g_server, &routes[i]);
+
+    ESP_ERROR_CHECK(mdns_init());
+    ESP_ERROR_CHECK(mdns_hostname_set("wfh"));            // → wfh.local
+    ESP_ERROR_CHECK(mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0));
+}
+```
+
+**Serve the web app from the board.** `http://wfh.local` talking to `http://wfh.local` sidesteps the mixed-content block that would stop an HTTPS-hosted page from reaching the board over plain HTTP. The built bundle goes on the LittleFS partition and is served by `static_get`; at a few hundred KB it fits comfortably in 16MB alongside the firmware and the database.
+
+### 8.3 Web app side
+
+One class. It owns the socket, the reconnect, the clock skew and the outbox, and it hands the rest of the app a plain snapshot.
 
 ```ts
-export interface Backend {
-  load(): Promise<DayLog>;
-  log(ev: LogEvent): Promise<void>;
-  subscribe(cb: (l: DayLog) => void): () => void;
-}
+// web/src/board.ts
+type Snapshot = { log: DayLog; view: DayView; power: Power; now: number };
 
-export const boardBackend = (host = 'wfh.local'): Backend => ({
-  load: () => fetch(`http://${host}/state`).then(r => r.json()),
-  log: ev => fetch(`http://${host}/event`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(ev),
-  }).then(() => void 0),
-  subscribe(cb) {
-    const ws = new WebSocket(`ws://${host}/ws`);
-    ws.onmessage = e => cb(JSON.parse(e.data));
-    return () => ws.close();
-  },
-});
+export class Board {
+  private ws?: WebSocket;
+  private backoff = 1000;                       // grows to 30s, resets on connect
+  private outbox: LogEvent[] = [];
+  skew = 0;                                     // board clock − browser clock
+  online = false;
+
+  constructor(private host = location.host, private onSnapshot: (s: Snapshot) => void) {}
+
+  // ── connect ────────────────────────────────────────────────────────────
+  start() {
+    this.ws = new WebSocket(`ws://${this.host}/ws`);
+
+    this.ws.onopen = () => {
+      this.online = true;
+      this.backoff = 1000;
+      this.flushOutbox();                       // replay anything logged offline
+    };
+
+    this.ws.onmessage = e => this.receive(JSON.parse(e.data));
+
+    this.ws.onclose = () => {
+      this.online = false;
+      this.onSnapshot(this.last!);              // re-render with the offline flag
+      setTimeout(() => this.start(), this.backoff);
+      this.backoff = Math.min(this.backoff * 2, 30_000);
+    };
+
+    // onerror always precedes onclose; let onclose own the reconnect so we
+    // never schedule two retries for one failure.
+    this.ws.onerror = () => this.ws?.close();
+  }
+
+  private receive(s: Snapshot) {
+    this.skew = s.now - Math.floor(Date.now() / 1000);
+    this.last = s;
+    this.onSnapshot(s);
+  }
+
+  // ── log a completion ───────────────────────────────────────────────────
+  async log(action: ActionId, kind: EventKind, slot: number) {
+    const ev: LogEvent = {
+      id: crypto.randomUUID(), action, kind, slot,
+      ts: this.boardNow(), source: 'web',
+    };
+
+    // Optimistic: bump the tile now, so the tap feels instant. The board's
+    // push will overwrite this within a few milliseconds if it lands.
+    this.onSnapshot(applyOptimistic(this.last!, ev));
+
+    try {
+      const r = await fetch(`http://${this.host}/event`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(ev),
+      });
+      if (!r.ok) throw new Error(String(r.status));
+    } catch {
+      this.outbox.push(ev);                     // retried on next connect
+    }
+  }
+
+  private async flushOutbox() {
+    for (const ev of [...this.outbox]) {
+      try {
+        await fetch(`http://${this.host}/event`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(ev),
+        });
+        this.outbox.splice(this.outbox.indexOf(ev), 1);
+      } catch { return; }                       // still down; try again later
+    }
+  }
+
+  /** The board's clock, not the browser's. Countdowns must agree with the tile. */
+  boardNow(): number { return Math.floor(Date.now() / 1000) + this.skew; }
+}
 ```
+
+The optimistic update is what makes a tap on the laptop feel like a tap on the board. It is safe to be wrong: the authoritative snapshot arrives moments later and replaces it wholesale, and if the request failed the outbox retries it. Nothing needs to be rolled back by hand.
 
 The UI layer — grid, tiles, wash, grain, dots — is the reviewed prototype, unchanged. It reads `DayView` and does not care where the log came from.
 
@@ -694,87 +1101,197 @@ The UI layer — grid, tiles, wash, grain, dots — is the reviewed prototype, u
 
 `color-mix` in oklab keeps the seven tints at even perceptual weight; mixing in sRGB would make the yellow and amber tiles read considerably hotter than the violet at the same percentage. The grain texture is one inline `feTurbulence` SVG data URI defined on `:root` and shared by every tile — one decoded bitmap in the compositor rather than seven.
 
-### 8.3 When the board is away
+### 8.4 When the board is away
 
-Asleep, off the LAN, or flat — all indistinguishable from a failed fetch, and the client does not need to know which. It shows the last log it saw, still accepts taps, and reconciles on reconnect via §3.6.
+Asleep, off the LAN, or flat — all indistinguishable from a closed socket, and the client does not need to tell them apart. `Board` keeps the last snapshot, keeps accepting taps into the outbox, and reconnects with backoff. The UI shows a plain marker and stops the countdowns, which would otherwise tick down to zero and lie.
 
-```ts
-export const resilient = (board: Backend, cache: Backend): Backend => ({
-  async load() {
-    try {
-      const fresh = await board.load();
-      await cache.save(fresh);
-      return outbox.length ? merge(fresh, outboxAsLog()) : fresh;
-    } catch {
-      return cache.load();                    // board away: last known state
-    }
-  },
-  async log(ev) {
-    await cache.append(ev);                   // never lose the tap
-    try { await board.log(ev); } catch { outbox.push(ev); }
-  },
-  subscribe: board.subscribe,
-});
+```tsx
+{!board.online && <div className="banner">Board offline — taps will sync when it returns</div>}
 ```
 
-Local write first, board write second, best-effort. The retry is safe at any multiplicity because `(action, slot)` dedupes.
-
-**The web app does not prompt in this state.** It shows a plain "board offline" marker in the header and nothing else changes. Filling the gap with browser-side prompting would resurrect exactly the two-scheduler problem §1 exists to avoid, and would do it at the worst possible moment — when the board comes back and both start chiming.
+**The web app does not prompt in this state.** No sound, no cards, no timers. Filling the gap with browser-side prompting would resurrect exactly the two-scheduler problem §1 exists to avoid, and would do it at the worst possible moment: when the board comes back and both start chiming.
 
 ---
 
 ## 9. Feedback
 
-### 9.1 On the board
+Three cues, matching the reviewed prototype's vocabulary. Both channels fire together and both are driven from one table, so a cue is defined in exactly one place.
 
-The speaker and a vibration motor on a PWM GPIO. Three cues, matching the reviewed prototype's vocabulary:
-
-| Event | Cue | Haptic |
+| Event | Sound | Haptic |
 |---|---|---|
-| Prompt appears | `bloom` | triple pulse `[40,60,40,60,40]` |
-| Action logged | `success` | short tick `[25]` |
-| Stretch step complete | `ready` | light tick `[12]` |
-
-*Note:* `bloom` is soft and may not cut through when heads-down. Test against `chime` and `ready` before locking it in — and test it on the board's actual speaker, which is small and will not reproduce the low end the way a laptop does. The cue that works in a browser prototype is not necessarily the cue that works here.
-
-Escalate rather than repeat: if a prompt goes unanswered for two minutes, re-cue once at higher volume. If it is still unanswered at the next slot it becomes a derived miss and goes quiet — the board should never nag in a loop.
-
-### 9.2 Away from the desk
-
-The board `POST`s to `notifi.it/send` for a native push on iPhone or Mac. One HTTP request, no SDK, no account.
+| Prompt appears | `bloom` — rising two-note | triple pulse |
+| Action logged | `success` — quick up-tick | short tick |
+| Stretch step complete | `ready` — single soft note | light tick |
 
 ```c
-static void notify(const char *title, const char *body) {
-    esp_http_client_config_t cfg = {
-        .url = "https://notifi.it/send",
-        .method = HTTP_METHOD_POST,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = 5000,
-    };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    char payload[256];
-    snprintf(payload, sizeof(payload),
-             "{\"channel\":\"%s\",\"title\":\"%s\",\"body\":\"%s\"}",
-             CONFIG_WFH_NOTIFI_CHANNEL, title, body);
-    esp_http_client_set_header(c, "Content-Type", "application/json");
-    esp_http_client_set_post_field(c, payload, strlen(payload));
-    esp_http_client_perform(c);          // fire and forget; never block the scheduler
-    esp_http_client_cleanup(c);
+// firmware/main/feedback.h
+typedef enum { CUE_BLOOM, CUE_SUCCESS, CUE_READY, CUE_COUNT } cue_t;
+
+void feedback_play(cue_t cue);      // sound + haptic together, non-blocking
+```
+
+```c
+// firmware/main/feedback.c — the one table
+typedef struct {
+    const tone_t   *tones;   int n_tones;
+    const uint16_t *buzz;    int n_buzz;    // alternating on/off ms
+} cue_def_t;
+
+static const tone_t BLOOM[]   = { {523, 90}, {659, 140} };        // C5 → E5
+static const tone_t SUCCESS[] = { {659, 70}, {880, 110} };        // E5 → A5
+static const tone_t READY[]   = { {440, 120} };                   // A4
+
+static const uint16_t BUZZ_PROMPT[]  = { 40, 60, 40, 60, 40 };
+static const uint16_t BUZZ_DONE[]    = { 25 };
+static const uint16_t BUZZ_LIGHT[]   = { 12 };
+
+static const cue_def_t CUES[CUE_COUNT] = {
+    [CUE_BLOOM]   = { BLOOM,   2, BUZZ_PROMPT, 5 },
+    [CUE_SUCCESS] = { SUCCESS, 2, BUZZ_DONE,   1 },
+    [CUE_READY]   = { READY,   1, BUZZ_LIGHT,  1 },
+};
+
+void feedback_play(cue_t cue) {
+    if (g_settings.sound)   audio_play(CUES[cue].tones, CUES[cue].n_tones);
+    if (g_settings.haptics) haptic_play(CUES[cue].buzz, CUES[cue].n_buzz);
 }
 ```
 
-Gate it on absence: send only when the IMU has reported no movement and the touch panel no interaction for several minutes. Pushing every prompt to the phone while the user is sitting in front of the board is how the phone becomes the thing they mute.
+### 9.1 Sound
+
+The speaker is driven over I2S. Rather than shipping audio files, synthesise the tones — a sine with a short attack and an exponential decay, which is all these cues are.
+
+**Check which amplifier and pin mapping your board revision uses** before wiring this up; the ESP32-S3 AMOLED boards have shipped with more than one audio arrangement.
+
+```c
+// firmware/main/audio.c
+#define SAMPLE_RATE 16000
+
+typedef struct { uint16_t freq_hz; uint16_t ms; } tone_t;
+
+/** Render one tone into `buf` and write it to I2S. Blocking, runs on the
+ *  audio task only — never call this from the LVGL or scheduler tasks. */
+static void render_tone(const tone_t *t) {
+    const int n = (SAMPLE_RATE * t->ms) / 1000;
+    static int16_t buf[SAMPLE_RATE / 4];              // 250ms max per tone
+    const float step = 2.0f * M_PI * t->freq_hz / SAMPLE_RATE;
+
+    for (int i = 0; i < n; i++) {
+        // Envelope: 5ms attack so it doesn't click, then exponential decay.
+        // Without the attack ramp a square-edged start pops audibly on a
+        // small speaker, which is exactly the wrong texture for a health nudge.
+        float attack = fminf(1.0f, i / (0.005f * SAMPLE_RATE));
+        float decay  = expf(-3.0f * i / n);
+        float env    = attack * decay * (g_settings.volume / 100.0f);
+
+        buf[i] = (int16_t)(sinf(step * i) * env * 12000);
+    }
+
+    size_t written;
+    i2s_channel_write(g_i2s, buf, n * sizeof(int16_t), &written, portMAX_DELAY);
+}
+
+/** Queue a cue. Returns immediately — the audio task does the work. */
+void audio_play(const tone_t *tones, int n) {
+    audio_msg_t msg = { .n = n };
+    memcpy(msg.tones, tones, n * sizeof(tone_t));
+    xQueueSend(g_audio_q, &msg, 0);      // drop if the queue is full, don't block
+}
+
+static void audio_task(void *arg) {
+    audio_msg_t msg;
+    for (;;) {
+        if (xQueueReceive(g_audio_q, &msg, portMAX_DELAY)) {
+            for (int i = 0; i < msg.n; i++) render_tone(&msg.tones[i]);
+        }
+    }
+}
+```
+
+Two things worth keeping: the queue means `feedback_play` never blocks a touch handler, and `xQueueSend` with a zero timeout means a burst of cues drops rather than backing up — three prompts arriving at once should not produce eight seconds of queued beeping.
+
+*Note:* `bloom` is soft and may not cut through when heads-down. Test against a brighter `chime` before locking it in, **and test it on the board's actual speaker**, which is small and will not reproduce the low end the way a laptop does. The cue that works in a browser prototype is not necessarily the cue that works here.
+
+**Escalate rather than repeat.** If a prompt goes unanswered for two minutes, re-cue once at higher volume. If it is still unanswered when the next slot arrives it becomes a derived miss and the board goes quiet. It must never nag in a loop.
+
+```c
+// In the scheduler tick.
+if (g_queue_len > 0 && now - g_prompt_raised_at == 120) {
+    audio_set_volume(g_settings.volume + 15);
+    feedback_play(CUE_BLOOM);
+    audio_set_volume(g_settings.volume);
+}
+```
+
+### 9.2 Haptics
+
+An ERM or LRA motor on a PWM (LEDC) pin through a small driver transistor. **The board does not have one fitted** — this is an added component on a spare GPIO, so budget for it in the enclosure.
+
+```c
+// firmware/main/haptic.c
+#define HAPTIC_GPIO      GPIO_NUM_14        // verify against your wiring
+#define HAPTIC_DUTY      180                // of 255; full duty is loud and buzzy
+
+void haptic_init(void) {
+    ledc_timer_config_t timer = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_8_BIT,
+        .timer_num = LEDC_TIMER_1,
+        .freq_hz = 200,                     // ERM motors like a few hundred Hz
+        .clk_cfg = LEDC_AUTO_CLK,
+    };
+    ledc_timer_config(&timer);
+
+    ledc_channel_config_t ch = {
+        .gpio_num = HAPTIC_GPIO, .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = LEDC_CHANNEL_1, .timer_sel = LEDC_TIMER_1, .duty = 0,
+    };
+    ledc_channel_config(&ch);
+
+    g_haptic_q = xQueueCreate(4, sizeof(haptic_msg_t));
+    xTaskCreate(haptic_task, "haptic", 2048, NULL, 5, NULL);
+}
+
+static void motor(bool on) {
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, on ? HAPTIC_DUTY : 0);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
+}
+
+/** Pattern is alternating on/off durations in ms, starting with on. */
+static void haptic_task(void *arg) {
+    haptic_msg_t msg;
+    for (;;) {
+        if (xQueueReceive(g_haptic_q, &msg, portMAX_DELAY)) {
+            for (int i = 0; i < msg.n; i++) {
+                motor(i % 2 == 0);                        // even = on, odd = off
+                vTaskDelay(pdMS_TO_TICKS(msg.pattern[i]));
+            }
+            motor(false);      // always leave it off, even if we were interrupted
+        }
+    }
+}
+
+void haptic_play(const uint16_t *pattern, int n) {
+    haptic_msg_t msg = { .n = n };
+    memcpy(msg.pattern, pattern, n * sizeof(uint16_t));
+    xQueueSend(g_haptic_q, &msg, 0);
+}
+```
+
+Same shape as audio — its own task, its own queue, non-blocking send. The unconditional `motor(false)` at the end of each pattern is the line that stops a crash or a reset mid-pattern from leaving the motor running.
 
 ### 9.3 In the web app
 
-Optional and secondary, since the board is making the noise. If enabled, `cuelume` (MIT, ESM, ~5kB, synthesized live) with a fallback to raw oscillators. Resume the `AudioContext` on first gesture or the first cue of the session is silent:
+Off by default. The board is making the noise, and a laptop echoing every cue a second time is worse than silence.
+
+If enabled, `cuelume` (MIT, ESM, ~5kB, synthesised live, no audio files) driven from the WebSocket push — the same three cues, so the vocabulary stays consistent wherever you hear it. Resume the `AudioContext` on the first gesture or the first cue of the session is silent:
 
 ```ts
 const unlock = () => { ctx?.resume(); document.removeEventListener('pointerdown', unlock); };
 document.addEventListener('pointerdown', unlock, { once: true });
 ```
 
-Haptics in the browser are a non-starter on iPhone — `navigator.vibrate` is unsupported in iOS Safari. Feature-detect and hide the toggle rather than showing a switch that does nothing. This costs nothing now that the board carries the haptics.
+No browser haptics: `navigator.vibrate` is unsupported in iOS Safari. Feature-detect and hide the toggle rather than showing a switch that does nothing — and it costs nothing now that the board carries the haptics.
 
 ---
 
@@ -810,14 +1327,14 @@ esp_wifi_set_ps(WIFI_PS_MAX_MODEM);   // wake only on DTIM beacons
 static void enter_dormant(time_t work_start_tomorrow) {
     uint64_t us = (uint64_t)(work_start_tomorrow - time(NULL)) * 1000000ULL;
     esp_sleep_enable_timer_wakeup(us);
-    esp_sleep_enable_ext1_wakeup(BIT64(PIN_BTN), ESP_EXT1_WAKEUP_ANY_LOW);
-    day_awake_close(&g_day, time(NULL));
-    day_persist(&g_day);                          // flush before we lose RAM
+    esp_sleep_enable_ext1_wakeup(BIT64(KEY_GPIO), ESP_EXT1_WAKEUP_ANY_LOW);
+    store_close_awake(time(NULL));                // seal the window, §3.4
+    sqlite3_close(g_db);                          // checkpoint WAL before sleep
     esp_deep_sleep_start();
 }
 ```
 
-**Running flat mid-day is a non-event.** This is the payoff from §3. The board dies at 14:00, gets plugged in at 15:30, and boots with the log intact in NVS and the correct wall-clock time from the PCF85063. It opens a new awake window at 15:30, and the slots between 14:00 and 15:30 are outside every window, so they are *not* misses. The user is not blamed for a dead battery.
+**Running flat mid-day is a non-event.** This is the payoff from §3. The board dies at 14:00, gets plugged in at 15:30, and boots with the database intact on flash and the correct wall-clock time from the PCF85063. It opens a new awake window at 15:30, and the slots between 14:00 and 15:30 are outside every window, so they are *not* misses. The user is not blamed for a dead battery.
 
 ```c
 static void on_power_event(axp2101_event_t ev) {
@@ -833,20 +1350,19 @@ static void on_power_event(axp2101_event_t ev) {
         idle_timeout_set(60 * 1000);
         break;
     case AXP2101_BATT_LOW:                        // ~15%
-        day_awake_close(&g_day, time(NULL));
-        day_persist(&g_day);
-        notify("WFH tracker low", "Battery at 15% — plug it in");
+        store_close_awake(time(NULL));             // seal while we still can
+        ui_show_battery_warning();                 // on the board, not the phone
         break;
     case AXP2101_BATT_CRITICAL:                   // ~5%
-        day_awake_close(&g_day, time(NULL));
-        day_persist(&g_day);
+        store_close_awake(time(NULL));
+        sqlite3_close(g_db);
         enter_dormant(0);                         // wake on USB only
         break;
     }
 }
 ```
 
-`day_awake_close` on the low-battery interrupt is the line that matters for correctness: it seals the window while there is still power to write NVS, so the log honestly records when the board stopped being able to prompt.
+`store_close_awake` on the low-battery interrupt is the line that matters for correctness: it seals the window while there is still power to commit, so the database honestly records when the board stopped being able to prompt. Closing the connection on the critical interrupt checkpoints the WAL, so the next boot opens a clean database rather than replaying a journal.
 
 Expose battery in `/state` so the web app can show it and the user is never guessing:
 
@@ -866,23 +1382,29 @@ Firmware first, because it is the product and it is the long pole. Each step sho
 
 1. **Board bring-up** — ESP-IDF project, display, touch, LVGL hello-world, WiFi, NTP-set RTC. Confirms the hardware and the toolchain before any product logic exists.
 2. **Config generation** — `actions.json` → `actions.g.h` / `actions.g.ts`, wired into the build with the CI diff check.
-3. **Data model in C** — `day_log_t`, `day_apply_event`, NVS persist and load, prune. Plus `derive` and the shared fixtures from §3.3. **This is the step to get right**; everything else is presentation.
-4. **Scheduler tick** — awake windows, jittered offsets, due detection. Testable on-desk by moving the RTC forward.
-5. **Grid UI** — tiles, dots, wash, header. First point at which the thing looks like itself.
-6. **Prompt queue and screens** — Done / Skip / Delay-all / X, tile-tap logging, physical key.
-7. **Sound and haptics** — cue vocabulary, escalation, motor PWM.
-8. **Guided stretch flow.**
-9. **HTTP server** — `/state`, `/event`, `/ws`, mDNS. The board is now complete and usable on its own.
-10. **Web app** — `derive` in TS against the shared fixtures, the reviewed grid UI, `resilient` backend, served from SPIFFS.
-11. **Power states** — light sleep, brightness, PMIC events, Dormant.
-12. **notifi.it push** with absence gating.
-13. **Settings screen** — working hours, per-action cadence, sound and haptics, on-device.
+3. **Storage** — LittleFS partition, SQLite, schema, `store_add_event` / `store_load_day` / `store_mark_awake`. Verifiable on its own with a serial console before any UI exists.
+4. **`derive` and `day_apply_event`** — the walk, the anchor rule, the awake test, plus the fixtures in §11.1. **This is the step to get right**; everything else is presentation.
+5. **Scheduler tick** — awake windows, jittered offsets, due detection. Testable on-desk by moving the RTC forward.
+6. **Grid UI** — tiles, dots, wash, header. First point at which the thing looks like itself.
+7. **Inputs** — prompt screens, Done / Skip / Delay-all / X, tile-tap logging, physical key (§7.4).
+8. **Sound and haptics** — the cue table, the I2S tone task, the motor task, escalation (§9).
+9. **Guided stretch flow.**
+10. **HTTP server** — `/state`, `/event`, `/ws`, mDNS (§8). The board is complete and usable on its own at this point.
+11. **Web app** — the reviewed grid UI, the `Board` client, served from LittleFS.
+12. **Power states** — light sleep, brightness, PMIC events, Dormant.
+13. **Settings screen** — working hours, per-action cadence, sound, haptics, IMU tap.
 
-Steps 1–9 are a finished product. Everything after is reach.
+Steps 1–10 are a finished product. Everything after is reach.
 
 ### 11.1 Test targets
 
-Steps 3 and 4 produce the bugs nobody notices for a week, and both are pure functions of `(log, now)`. Cover them via the §3.3 fixtures, which the C and TS suites share:
+Step 4 produces the bugs nobody notices for a week, and `derive` is a pure function of `(log, now, settings)` — so it compiles and runs on a laptop with no board attached. Build a host target for it early; the flash-and-test loop is far too slow to iterate a slot-walk bug on hardware.
+
+```
+firmware/test/           # host build: gcc, no ESP-IDF, runs in milliseconds
+  test_derive.c          # loads every fixture below and asserts the view
+fixtures/derive/*.json   # the cases
+```
 
 ```
 fixtures/derive/
@@ -892,12 +1414,12 @@ fixtures/derive/
   missed-while-asleep.json          unanswered + gap = NOT missed
   awake-gap-boundary.json           119s extends, 121s opens a new window
   duplicate-event.json              second apply is a no-op
-  merge-commutes.json               merge(a,b) and merge(b,a) derive identically
+  replay-idempotent.json            applying the same event twice changes nothing
   stretch-priority.json             stretches take the queue head
   dst-forward.json                  no slots lost or doubled on the changeover
 ```
 
-The last four are the ones worth having. Idempotence under replay and commutativity of merge are what the whole board-plus-browser story rests on, and DST is the bug that will otherwise appear twice a year and be impossible to reproduce.
+The last three are the ones worth having. The awake-gap boundary is what separates "you missed this" from "the board was off", idempotence under replay is what makes the web app's retries safe, and DST is the bug that will otherwise appear twice a year and be impossible to reproduce.
 
 ### 11.2 Day rollover
 
@@ -909,64 +1431,78 @@ Handled in the tick (§5.2), not on boot: the board runs for weeks at a time, so
 
 - **Single point of failure.** The board is the product. If it is off the LAN, the web app is a read-only cache; if it is dead, there is no tracker. Accepted deliberately — the alternative is two schedulers.
 - **Firmware dev loop.** Flash-and-test is slower than a browser reload. §3.3's fixtures and a host-compiled unit test target for `derive` and the slot maths take most of the sting out; build those early.
-- **LAN-only.** `/state` and `/event` are unauthenticated on the local network. Fine for a home LAN, not fine on a shared or office network — if that changes, put a shared secret in a header before exposing it further. Away-from-home reach is push-only, via §9.2.
-- **Two `derive` implementations** must stay in agreement. Mitigated by shared fixtures, not eliminated.
-- **No cross-device sync beyond the board.** The board is the only writer of record; two browsers merge through it, not with each other.
+- **LAN-only, unauthenticated.** Anyone on the same network can read `/state` and post to `/event`. Fine for a home LAN; not fine on a shared or office network. If that changes, put a shared secret in a header before exposing it further.
+- **No cross-device sync beyond the board.** The board is the only writer of record; two browsers reconcile through it, not with each other.
+- **No reach away from the desk.** Deliberate. If you are not at the board, it does not prompt you, and it does not tell your phone.
 - **Clock.** NTP at boot when WiFi is available, PCF85063 otherwise. A board that has never seen NTP and has a flat backup cell will have a wrong date, and the day key will be wrong with it. Show the date in the header so this is visible rather than silent.
 
 What is explicitly *not* a constraint, thanks to §3: a board that slept, ran flat, or was unplugged does not accumulate misses. It can be switched off freely without the day's record becoming a wall of hollow rings.
 
 ---
 
-## 13. Storage: SQLite?
+## 13. What SQLite buys
 
-Considered and deferred. It is a good fit for the shape the data took in §3, and a poor fit for the volume — so the answer depends entirely on whether historical views arrive.
+The schema and the storage code are in §3.5. This section is why, and where the line is.
 
-### 13.1 Why it fits the model well
+### 13.1 It removes code rather than adding it
 
-§3 made the store an append-only log of uniquely-keyed rows. That is a table, and the idempotence that `day_apply_event` enforces with a linear scan becomes a schema constraint — strictly better, since the database refuses the duplicate whatever its source:
+The model in §3.1 — an append-only log of uniquely-keyed rows plus a table of intervals — *is* relational. Storing it as packed blobs meant hand-writing the things a database already does. Three examples from earlier drafts of this plan, all now deleted:
+
+| Was | Is |
+|---|---|
+| A linear scan over the events array to reject duplicates | `UNIQUE (action, slot)` + `INSERT OR IGNORE` |
+| `EVENTS_MAX` / `AWAKE_MAX` caps and overflow handling | rows |
+| A key-scanning prune of old day blobs | one `DELETE ... WHERE day < date(...)` |
+
+The dedupe case is the one that matters most. It was the load-bearing invariant of the whole design — the thing that makes retries, double-taps and two clients safe — and it was enforced by a loop that a future edit could quietly break. As a constraint, the database refuses the duplicate no matter which code path reached it, including paths nobody has written yet.
+
+WAL mode is the other quiet win: a power cut mid-write on a battery-powered device leaves the last committed transaction intact rather than a half-written blob.
+
+### 13.2 Where the line is
+
+**`derive` stays in C. Do not move it into SQL.**
+
+Counts and skips would translate fine — one `GROUP BY`. But `missed` and `next` need the slot walk, and §5.3's early-completion rule means slot *n+1* depends on the event that answered slot *n*. In SQL that is a recursive CTE joining each generated slot back against `events`, parameterised per action because the cadence lives in config:
 
 ```sql
-CREATE TABLE events (
-  id     TEXT PRIMARY KEY,
-  day    TEXT NOT NULL,
-  action TEXT NOT NULL,
-  kind   TEXT NOT NULL CHECK (kind IN ('done', 'skip')),
-  ts     INTEGER NOT NULL,
-  slot   INTEGER NOT NULL,
-  source TEXT NOT NULL DEFAULT 'board',
-  UNIQUE (action, slot)                  -- the dedupe key, enforced
-);
-CREATE INDEX events_day ON events (day);
-
-CREATE TABLE awake (
-  day   TEXT NOT NULL,
-  start INTEGER NOT NULL,
-  fin   INTEGER NOT NULL,
-  PRIMARY KEY (day, start)
-);
+-- What NOT to write. Correct, and far harder to read than the C it replaces.
+WITH RECURSIVE slots(slot) AS (
+  SELECT :first_slot
+  UNION ALL
+  SELECT COALESCE((SELECT e.ts FROM events e
+                    WHERE e.action = :action AND e.slot = slots.slot AND e.kind = 'done'),
+                  slots.slot) + :every_sec
+  FROM slots WHERE slot < :work_end
+)
+SELECT COUNT(*) FROM slots WHERE ...
 ```
 
-`INSERT OR IGNORE` becomes the whole of `day_apply_event`, and counts become one `GROUP BY` instead of a walk.
+The rule: **the database holds facts, `derive` holds meaning.** Anything involving cadences, slots or working hours is scheduling semantics and belongs in the C. Anything that is counting or filtering rows belongs in SQL.
 
-**But `missed` and `next` do not translate cleanly.** Both need the slot walk, and §5.3's early-completion rule means slot *n+1* depends on the event that answered slot *n*. In SQL that is a recursive CTE joining each generated slot back against `events` — correct, and worse than the code it replaces: harder to read, harder to test, and parameterised per action because the cadence lives in config. **Keep `derive` in code regardless of store.** Database for facts and aggregates, not for scheduling semantics.
+### 13.3 What it unlocks later
 
-### 13.2 Not yet
+Retention is 400 days (§3.5), so the data for history is accumulating from day one even though v1 renders only today. When historical views arrive they are queries, not a migration:
 
-On the board it is viable now: the SQLite3 port runs on ESP32 over a FATFS or LittleFS partition, and 8MB of PSRAM comfortably covers the page cache. At ~30 writes a day flash wear is not a consideration. It costs a few hundred KB of flash and a filesystem partition, against NVS blobs at ~4KB a day with no dependency at all.
+```sql
+-- Water over the last 30 days
+SELECT day, COUNT(*) AS n
+FROM events
+WHERE action = 'water' AND kind = 'done' AND day >= date('now','localtime','-30 days')
+GROUP BY day ORDER BY day;
 
-For a v1 scoped to "today at a glance", that is a dependency bought for nothing.
+-- Current streak of days where every action hit its target
+SELECT COUNT(*) FROM (
+  SELECT day FROM events WHERE kind = 'done'
+  GROUP BY day HAVING COUNT(DISTINCT action) = 7
+  ORDER BY day DESC
+);
 
-### 13.3 When it becomes the right call
+-- Which action gets skipped most, and at what time of day
+SELECT action, strftime('%H', ts, 'unixepoch', 'localtime') AS hour, COUNT(*) AS n
+FROM events WHERE kind = 'skip'
+GROUP BY action, hour ORDER BY n DESC;
+```
 
-Two triggers, either of which flips it:
+That last one is the interesting one, and it is the argument for keeping the data: "you skip your 15:30 snack four days in five" is a fact about the schedule being wrong, not about the person. A tracker that can notice that is worth more than one that only counts.
 
-1. **Historical views.** "Water over the last 30 days", streaks, weekday-vs-Friday. Hand-rolled aggregation over per-day NVS blobs stops being pleasant immediately and SQL starts paying for itself.
-2. **The board as archive.** 16MB of flash holds years of this. `GET /history?from=&to=` backed by a real query is a far better API than shipping a year of blobs to the browser to reduce client-side.
-
-Two rules keep the door open, and §3 already did most of the work by making the store an append-only log behind one function:
-
-- **Never read the derived view out of the database.** Facts in, `derive` on top. The moment a query returns `missed` directly, the board and the browser can disagree about what a miss is and §3's guarantee is gone.
-- **Migration is a replay, not a conversion.** Read the NVS blobs, `INSERT OR IGNORE` every event, done. Idempotent, re-runnable, safe to abandon halfway.
-
-**Decision: NVS blobs for v1. Revisit at the first historical view.**
+Serve it as `GET /history?from=&to=` when the time comes — a query on the board beats shipping a year of rows to the browser to reduce client-side.
