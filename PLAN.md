@@ -1247,3 +1247,130 @@ static void notify(const char *title, const char *body) {
 Send a push only when the user has been away — gate it on the IMU reporting no movement and the touch panel reporting no interaction for the last few minutes. Pushing every prompt to the phone while the user is sitting at the board would make the phone the thing they mute.
 
 The 368x448 display maps cleanly onto the square grid layout with room for a header, so the UI transfers with minimal rework: a 368x368 square for the seven tiles and 80px of header for the clock and day tallies.
+
+---
+
+## 11. Storage: SQLite?
+
+Considered and deferred. It is a good fit for the shape the data took in §3, and a poor fit for the volume — so the answer depends entirely on whether historical views arrive.
+
+### 11.1 Why it fits the model well
+
+The revision in §3 turned the store into an append-only log of uniquely-keyed rows. That is a table. The idempotence that §3.4 enforces with a `some()` check becomes a schema constraint, which is strictly better — the database refuses the duplicate whether it came from a retry, a second tab, or the board:
+
+```sql
+CREATE TABLE events (
+  id     TEXT PRIMARY KEY,               -- uuid v4
+  day    TEXT NOT NULL,                  -- YYYY-MM-DD, local
+  action TEXT NOT NULL,
+  kind   TEXT NOT NULL CHECK (kind IN ('done', 'skip')),
+  ts     INTEGER NOT NULL,               -- epoch seconds
+  slot   INTEGER NOT NULL,
+  source TEXT NOT NULL DEFAULT 'web',    -- 'web' | 'board'
+  UNIQUE (action, slot)                  -- the dedupe key, enforced
+);
+CREATE INDEX events_day ON events (day);
+
+CREATE TABLE awake (
+  day   TEXT    NOT NULL,
+  start INTEGER NOT NULL,
+  fin   INTEGER NOT NULL,
+  PRIMARY KEY (day, start)
+);
+```
+
+```sql
+-- The whole of appendEvent(). Retries are free.
+INSERT OR IGNORE INTO events (id, day, action, kind, ts, slot, source)
+VALUES (?, ?, ?, ?, ?, ?, ?);
+```
+
+Counts and skips become one query instead of a walk:
+
+```sql
+SELECT action, kind, COUNT(*) AS n
+FROM events WHERE day = ? GROUP BY action, kind;
+```
+
+**But `missed` and `next` do not translate cleanly, and that is the catch.** Both need the slot walk from §3.2, and that walk is not a fixed lattice — §4.3's early-completion rule re-anchors an interval action from the tap, so slot *n+1* depends on the event that answered slot *n*. Expressing that in SQL means a recursive CTE that joins each generated slot back against `events` to decide where the next one lands:
+
+```sql
+WITH RECURSIVE slots(action, slot) AS (
+  SELECT 'water', :first_slot
+  UNION ALL
+  SELECT s.action,
+         COALESCE((SELECT e.ts FROM events e                     -- re-anchor …
+                    WHERE e.action = s.action AND e.slot = s.slot
+                      AND e.kind = 'done'), s.slot) + :every_sec  -- … or advance
+  FROM slots s WHERE s.slot < :work_end
+)
+SELECT COUNT(*) FROM slots s
+WHERE s.slot <= :now
+  AND NOT EXISTS (SELECT 1 FROM events e WHERE e.action = s.action AND e.slot = s.slot)
+  AND EXISTS (SELECT 1 FROM awake a WHERE s.slot BETWEEN a.start AND a.fin);
+```
+
+That is correct and it is worse than the fifteen lines of TypeScript it replaces — harder to read, harder to test, and it has to be parameterised per action because the cadence lives in config. **Keep `derive` in code even if the storage becomes SQL.** Use the database for facts and aggregates, not for the scheduling semantics.
+
+### 11.2 Phase 1 (browser): not yet
+
+It works. `@sqlite.org/sqlite-wasm` with the `opfs-sahpool` VFS persists properly and — unlike the plain OPFS VFS — does not need `SharedArrayBuffer`, so no COOP/COEP headers and no hosting constraints. Verify that against the current release before committing to it; the VFS story has moved more than once.
+
+The cost is the problem relative to the benefit:
+
+| | localStorage JSON | SQLite WASM |
+|---|---|---|
+| Payload | 0 | ~1MB wasm |
+| Startup | synchronous | async init, worker |
+| Writes/day | ~30 | ~30 |
+| Data/day | ~4KB | ~4KB |
+| Year of data | ~1.4MB | ~1.4MB |
+
+A year fits inside the ~5MB localStorage quota, and §3.4 already prunes to 14 days. **Roughly a megabyte of WebAssembly to manage four kilobytes a day is not a trade worth making** for a v1 whose stated scope is "today at a glance, no historical views".
+
+If localStorage specifically is the worry, IndexedDB is the proportionate step up — no payload, much larger quota, and it survives storage pressure better. That is a twenty-line adapter, not a database engine.
+
+### 11.3 When it becomes the right call
+
+Three triggers, any one of which flips this:
+
+1. **Historical views.** "Water over the last 30 days", streaks, a weekday-vs-Friday comparison. This is where hand-rolled aggregation over per-day JSON keys stops being pleasant and SQL starts paying for itself immediately.
+2. **The board as archive (Phase 2).** 16MB of flash holds years of this. `GET /history?from=&to=` backed by a real query is a much better API than shipping a year of JSON blobs to the browser to reduce client-side.
+3. **A sync server.** The moment there is a third party mediating between board and browser, its store should be SQLite, and the `(action, slot)` uniqueness makes multi-writer sync nearly free.
+
+On the board it is viable now: the SQLite3 port runs on ESP32 over a FATFS or LittleFS partition, and the 8MB PSRAM comfortably covers the page cache. At ~30 writes a day, flash wear is not a consideration. It costs a few hundred KB of flash and a filesystem partition, against NVS blobs which are ~4KB a day and need no dependency at all. **Ship Phase 2 on NVS; move to SQLite when history lands** — same trigger as the browser.
+
+### 11.4 Keeping the door open
+
+Nothing needs to change now, because §3 already did the work. The store is an append-only log behind the `Backend` interface from §10.2, so swapping the implementation touches one file:
+
+```ts
+export const sqliteBackend = async (): Promise<Backend> => {
+  const sqlite3 = await sqlite3InitModule();
+  const db = new sqlite3.oo1.OpfsSAHPoolDb('/wfh.sqlite3');
+  db.exec(SCHEMA);                                    // idempotent, IF NOT EXISTS
+
+  return {
+    async load(date = todayKey()) {
+      return {
+        version: 2, date,
+        events: db.selectObjects('SELECT * FROM events WHERE day = ? ORDER BY ts', [date]),
+        awake:  db.selectArrays('SELECT start, fin FROM awake WHERE day = ?', [date]),
+        snoozedUntil: {},                             // transient; not persisted
+      };
+    },
+    async log(ev) {
+      db.exec({ sql: INSERT_OR_IGNORE, bind: [ev.id, todayKey(), ev.action,
+                                               ev.kind, ev.ts, ev.slot, 'web'] });
+    },
+    subscribe: () => () => {},
+  };
+};
+```
+
+`derive` is untouched, the reducers are untouched, the UI is untouched. Two rules keep it that way:
+
+- **Never read the derived view out of the database.** Facts in, `derive` on top. The moment a query returns `missed` directly, the board and the browser can disagree about what a miss is, and §3's guarantee is gone.
+- **Migration is a replay, not a conversion.** Read the JSON day keys, `INSERT OR IGNORE` every event, done. Idempotent, re-runnable, and safe to abandon halfway.
+
+**Decision: stay on localStorage for Phase 1 and NVS for Phase 2. Revisit at the first historical view.** Write the schema above into the repo when that happens; do not carry the dependency before then.
