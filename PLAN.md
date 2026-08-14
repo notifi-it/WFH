@@ -755,11 +755,24 @@ static void on_tile_cb(lv_event_t *e) {
 }
 ```
 
-**Physical key.** One press = Done on the current prompt, which is what you want when the prompt is "stand up" and you are already standing — you can answer it without looking.
+**Physical key — the board has two buttons, and only one of them is usable.**
+
+| Button | Read via | Notes |
+|---|---|---|
+| **BOOT** | `GPIO0`, active low | Free for us at runtime. Strapping pin: held at power-on it enters download mode. |
+| **PWR** | `EXIO4` on the I/O expander | 6s hold is a hardware power-off in the PMIC. Not a native GPIO. |
+
+**Use BOOT as the user key.** PWR is disqualified on two counts: it is behind an I²C expander rather than a native pin, so it cannot serve as a deep-sleep wake source and cannot be polled without an I²C transaction; and its long-press is owned by the PMIC as a hardware power-off, so the 6s gesture is not ours to redefine.
+
+BOOT being a strapping pin is worth knowing but not disqualifying: it only matters at power-on, and at runtime `GPIO0` is an ordinary readable input. The practical consequence is one to remember at the bench — resting a finger on the key while plugging in USB drops the board into download mode instead of booting the app.
+
+`GPIO0` is RTC-capable on the ESP32-S3, which is what makes the `ext1` wake in §10 work.
+
+One press = Done on the current prompt, which is what you want when the prompt is "stand up" and you are already standing — you can answer it without looking.
 
 ```c
 // firmware/main/key.c
-#define KEY_GPIO        GPIO_NUM_0     // verify against your board revision
+#define KEY_GPIO        GPIO_NUM_0     // BOOT. The only usable key — see above.
 #define DEBOUNCE_US     250000         // 250ms
 #define LONG_PRESS_US   800000         // 800ms
 
@@ -768,7 +781,7 @@ static void key_task(void *arg) {
     bool    was_down   = false;
 
     for (;;) {
-        bool down = gpio_get_level(KEY_GPIO) == 0;      // active low — verify
+        bool down = gpio_get_level(KEY_GPIO) == 0;      // BOOT is active low
         int64_t now = esp_timer_get_time();
 
         if (down && !was_down) {                        // edge: press
@@ -794,7 +807,7 @@ static void key_task(void *arg) {
 
 The wake-then-answer split matters: a single press that both lights the panel and logs a completion means every accidental brush marks water as drunk. First press wakes, second press commits. Acting on *release* rather than press is what makes the long-press variant possible without a second button.
 
-**Check the touch controller part and the key GPIO against the Waveshare schematic for your board revision** rather than trusting the numbers here — the AMOLED boards have changed touch parts between revisions, and the BOOT key is shared with strapping on some layouts, which will bite you at flash time.
+Confirm the touch controller part against the schematic for your board revision — the AMOLED boards have changed touch parts between revisions — but the two-button arrangement above is per Waveshare's documentation for this model.
 
 **IMU tap (optional, default off).** The QMI8658 has tap detection, so a knock on the desk beside the board could answer the current prompt without reaching for it — genuinely nice for "stand break", since you are already moving.
 
@@ -1327,6 +1340,8 @@ esp_wifi_set_ps(WIFI_PS_MAX_MODEM);   // wake only on DTIM beacons
 static void enter_dormant(time_t work_start_tomorrow) {
     uint64_t us = (uint64_t)(work_start_tomorrow - time(NULL)) * 1000000ULL;
     esp_sleep_enable_timer_wakeup(us);
+    // BOOT/GPIO0 is RTC-capable, so it can wake us. PWR cannot — it is behind
+    // the I/O expander, which is unpowered in deep sleep. §7.4
     esp_sleep_enable_ext1_wakeup(BIT64(KEY_GPIO), ESP_EXT1_WAKEUP_ANY_LOW);
     store_close_awake(time(NULL));                // seal the window, §3.4
     sqlite3_close(g_db);                          // checkpoint WAL before sleep
