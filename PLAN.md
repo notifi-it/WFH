@@ -12,10 +12,10 @@ A square-format habit tracker that prompts seven actions on independent timers d
 
 Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.8 (368x448, ESP32-S3R8, 8MB PSRAM, 16MB flash, QMI8658 IMU, PCF85063 RTC, AXP2101 PMIC, speaker, battery).
 
-- The **board** owns the schedule, the clock, the event log, the prompting, the sound and the haptics. It is the product.
+- The **board** owns the schedule, the clock, the event log, the prompting and the sound. It is the product.
 - The **web app** is a viewer and a remote. It renders the same day from the same log and can log a completion, but it never schedules and never prompts.
 
-This was previously split into a browser-first phase and a hardware phase. That split meant building a browser scheduler with known-unfixable reliability problems — tab suspension, no haptics on iOS — and then deleting it. The single-phase version skips the throwaway.
+This was previously split into a browser-first phase and a hardware phase. That split meant building a browser scheduler with known-unfixable reliability problems — tab suspension chief among them — and then deleting it. The single-phase version skips the throwaway.
 
 The board sits on the desk and prompts the person sitting at it. It does not chase them elsewhere: no phone push, no notifications away from the desk. If you are not there, you are not there.
 
@@ -53,15 +53,15 @@ The board and the web app both need this table, and two hand-maintained copies w
   "actions": [
     { "id": "stand", "name": "Stand break", "blurb": "Up on your feet for a minute.",
       "icon": "person-check", "tint": "#7fd4a8", "target": 10, "flow": "tap", "priority": 1,
-      "cadence": { "kind": "interval", "everyMin": 40, "startOffsetMin": 12 } },
+      "cadence": { "kind": "interval", "everyMin": 40 } },
 
     { "id": "water", "name": "Water", "blurb": "Glass of water. Refill while you are up.",
       "icon": "drop", "tint": "#6ec3e0", "target": 8, "flow": "tap", "priority": 1,
-      "cadence": { "kind": "interval", "everyMin": 45, "startOffsetMin": 7 } },
+      "cadence": { "kind": "interval", "everyMin": 45 } },
 
     { "id": "roll", "name": "Shoulder roll", "blurb": "Ten slow rolls back, then drop the shoulders.",
       "icon": "refresh", "tint": "#b6a3e8", "target": 8, "flow": "tap", "priority": 1,
-      "cadence": { "kind": "interval", "everyMin": 60, "startOffsetMin": 3 } },
+      "cadence": { "kind": "interval", "everyMin": 60 } },
 
     { "id": "snack", "name": "Snack", "blurb": "Something small before the slump.",
       "icon": "apple", "tint": "#e8b06a", "target": 2, "flow": "tap", "priority": 2,
@@ -95,7 +95,7 @@ tools/gen-config.mjs  →  firmware/main/actions.g.h      (C: static const actio
 
 Both generated files are committed and both are checked in CI (`gen-config && git diff --exit-code`), so a hand-edit of a generated file fails the build rather than silently surviving.
 
-`startOffsetMin` is jitter expressed as data: stand fires at 09:12, water at 09:07, roll at 09:03. The three interval actions collide far less than they would from a common 09:00 anchor — see §5.
+**No jitter.** An earlier draft staggered start offsets (stand at 09:12, water at 09:07, …) specifically to keep the three interval actions from lining up. That was solving the wrong problem: collisions are fine now that the card shows everything due at once as a checklist (§6) rather than answering one at a time. All three actions anchor to `workStart` and simply collide when they collide.
 
 ---
 
@@ -105,33 +105,25 @@ Shared verbatim between the board and the web app. This is what makes the two in
 
 ### 3.1 What is actually true
 
-Three things are facts. Everything else is a view over them.
+Two things are facts. Everything else is a view over them.
 
 1. **The schedule** — config, from §2.1. Not per-day data.
 2. **The event log** — what the user did. Append-only. `done` and `skip`, nothing else.
-3. **The awake windows** — the periods the board was actually running and able to prompt.
 
-The load-bearing idea: **a miss is not an event, it is an absence.** Nothing happens when a slot is missed — that is what missing it means. So there is nothing to write. A slot is missed if it is in the past, it fell inside an awake window, and no `done` or `skip` answers it.
+**A miss is derived, not stored:** a slot is missed if it is in the past and no `done` or `skip` answers it. No third fact needed, no "was the board even on" tracking.
 
-Deriving rather than writing buys three things:
+**This was simplified from an earlier draft that also tracked awake windows** — periods the board was demonstrably running — so a slot that passed while the board was off, asleep, or flat could be told apart from one the board genuinely failed to prompt for. That bought a real property (a board that ran flat for 90 minutes didn't get blamed for 90 minutes of misses) at the cost of real complexity: a second table, a gap-detection heuristic with a tunable constant, and a join in `derive` that had to reason about two kinds of interval simultaneously.
 
-- It cannot drift. There is no second copy to disagree with the log.
-- **There is no backfill problem.** Slots that passed while nothing was running aren't in an awake window, so they aren't missed. No repair pass on boot, no setting, no decision.
-- **A board that slept, ran flat, or was unplugged is just a gap in `awake`.** No special case. This is the entire answer to §10.
-
-Storing misses would mean a board that ran flat overnight wakes up and writes forty misses for slots nobody was ever prompted about. Deriving them means it wakes up and writes nothing, because nothing happened.
-
-> The app can only mark you as having missed something it actually asked you about.
+**Removed.** The rule now is the plain one: **unanswered and in the past means missed, full stop.** The tradeoff this accepts, stated plainly rather than buried: a board that was off — asleep, unplugged, dead battery — for any part of the working day will show every slot it missed during that gap as a genuine miss when it comes back, the same as if it had been on and simply not prompted. If that turns out to matter in practice, the fix is to reintroduce presence tracking in one narrow form (§10 already notes the board should mostly stay on USB power, which makes the gap rare); it is not worth the model complexity up front.
 
 ```json
 {
-  "version": 2,
+  "version": 3,
   "date": "2026-08-14",
   "events": [
     { "id": "…", "action": "water", "kind": "done", "ts": 1723645210, "slot": 1723645020, "source": "board" },
     { "id": "…", "action": "stand", "kind": "skip", "ts": 1723646400, "slot": 1723646400, "source": "web" }
   ],
-  "awake": [ [1723640400, 1723645210], [1723649000, 1723652600] ],
   "snoozedUntil": { "stand": 1723647300 }
 }
 ```
@@ -149,14 +141,11 @@ export interface LogEvent {
   source: 'board' | 'web';
 }
 
-export type Awake = [start: number, end: number][];
-
 /** Everything persisted for one day. Facts only. */
 export interface DayLog {
-  version: 2;
+  version: 3;
   date: string;                                   // YYYY-MM-DD, local
   events: LogEvent[];
-  awake: Awake;
   snoozedUntil: Partial<Record<ActionId, number>>;
 }
 
@@ -173,6 +162,16 @@ export interface DayView {
 `slot` is the field that makes the whole thing idempotent. A retry, a second browser tab, the board and the web app both logging the same prompt — all collapse to one entry because `(action, slot)` is unique. It is also the join key between the schedule and the log, which is what lets a miss be derived at all.
 
 `source` is diagnostic only. Nothing branches on it; it exists so that "did I tap this on the board or on my laptop?" is answerable when something looks wrong.
+
+### 3.1a Timestamps: epoch everywhere except display
+
+Stated as a rule rather than left implicit: **every timestamp that is stored, transmitted, or compared is an epoch integer.** `ts`, `slot`, `snoozedUntil` values, the `now` field in the API snapshot — all epoch seconds, UTC-equivalent, no timezone attached because none is needed.
+
+The one exception is `cadence.times` in `actions.json` (`"11:30"`, `"16:30"`, …) — a wall-clock string, because that's the natural way for a human to author a schedule. It is converted to an epoch value immediately by `at_time()` (§5.1) and never travels as a string past that point; nothing downstream of config ever parses a time-of-day string again.
+
+Local wall-clock time reappears exactly once more: at render, when a timestamp becomes "4m" on a tile or "14:32" in the header. That conversion happens in the UI layer only, on both the board and the web app, and is never fed back into the model.
+
+**Why this matters for timezones.** All slot arithmetic happens in the board's own local time (§5.1, via `mktime`/`localtime_r` against a `TZ` set at boot). A browser open from a different timezone doesn't need to agree, because it never computes a slot time itself — it only ever receives an epoch timestamp from the board and formats it for display. The board's clock is authoritative; there is nothing for a client's timezone to get wrong. The one real gap is the board itself: nothing auto-detects a new timezone if the board physically moves (no GPS), so a relocated board needs its `TZ` setting updated by hand.
 
 ### 3.2 Derivation
 
@@ -198,10 +197,8 @@ export function derive(log: DayLog, now: number, s: Settings, day = new Date()):
       } else if (ev?.kind === 'skip') {
         view.skipped[def.id] = (view.skipped[def.id] ?? 0) + 1;
       } else if (slot <= now) {
-        // Unanswered and in the past. Missed only if we were awake to ask.
-        if (wasAwake(log.awake, slot)) {
-          view.missed[def.id] = (view.missed[def.id] ?? 0) + 1;
-        }
+        // Unanswered and in the past. Missed, full stop — see §3.1.
+        view.missed[def.id] = (view.missed[def.id] ?? 0) + 1;
         if (isDueNow(slot, now, log.snoozedUntil[def.id])) view.due.push(def.id);
       } else {
         view.next[def.id] = slot;          // first future slot; stop here
@@ -216,9 +213,6 @@ export function derive(log: DayLog, now: number, s: Settings, day = new Date()):
   view.due.sort((a, b) => BY_ID[b].priority - BY_ID[a].priority);
   return view;
 }
-
-export const wasAwake = (awake: Awake, t: number): boolean =>
-  awake.some(([from, to]) => t >= from && t <= to);
 ```
 
 The subtlety is `anchor`. §5.3's rule — an interval action done early resets its timer from the tap — means the slot grid for `stand` is not a fixed lattice; it bends every time you get ahead. Folding the anchor forward during the walk reproduces exactly the sequence the live scheduler produced, which is what makes the derived view agree with what the user actually saw on the board.
@@ -242,28 +236,7 @@ The log is still sent, for two reasons: it is small (~4KB), and it lets the web 
 
 Fixtures still earn their place for the one remaining implementation — see §11.1.
 
-### 3.4 Awake windows
-
-Written by the same tick that drives everything else. Extend the current window if the last tick was recent; otherwise open a new one, because a gap means the board was not running.
-
-```c
-#define AWAKE_GAP_SEC 120   // > one slow tick, << the shortest cadence
-
-void day_mark_awake(day_log_t *log, time_t now) {
-    awake_win_t *last = log->awake_len ? &log->awake[log->awake_len - 1] : NULL;
-    if (last && now - last->fin <= AWAKE_GAP_SEC) {
-        last->fin = now;                                   // extend
-    } else if (log->awake_len < AWAKE_MAX) {
-        log->awake[log->awake_len++] = (awake_win_t){ .start = now, .fin = now };
-    }
-}
-```
-
-`AWAKE_GAP_SEC` at 120 is the judgement call. Too tight and ordinary scheduling jitter fragments the day into hundreds of windows that start reporting phantom misses for slots the board *was* awake for. Too loose and a genuinely-off board looks awake. Two minutes clears any plausible tick delay while staying well under the 40-minute shortest cadence.
-
-The array stays small — a normal day is one to five windows — because extension mutates the last entry rather than appending. `AWAKE_MAX` of 32 is generous; if it ever fills, stop extending rather than wrapping, since a lost window costs at most a few phantom misses while a wrapped one corrupts the day.
-
-### 3.5 Persistence — SQLite
+### 3.4 Persistence — SQLite
 
 The board's store is a SQLite database on a LittleFS partition. The full rationale is in §13; the short version is that the model from §3.1 *is* a table, and SQL expresses it more plainly than hand-rolled blob packing does.
 
@@ -288,15 +261,6 @@ CREATE TABLE IF NOT EXISTS events (
 );
 
 CREATE INDEX IF NOT EXISTS events_day ON events (day);
-
--- When the board was awake and able to prompt. A slot outside every window
--- was never asked about, so it can never be a miss. See §3.1.
-CREATE TABLE IF NOT EXISTS awake (
-  day     TEXT NOT NULL,
-  start   INTEGER NOT NULL,
-  fin     INTEGER NOT NULL,
-  PRIMARY KEY (day, start)
-);
 
 CREATE TABLE IF NOT EXISTS settings (
   key     TEXT PRIMARY KEY,
@@ -365,7 +329,6 @@ bool store_add_event(const log_event_t *ev) {
 ```c
 void store_load_day(const char *day, day_log_t *out) {
     out->events_len = 0;
-    out->awake_len  = 0;
 
     sqlite3_stmt *st;
     sqlite3_prepare_v2(g_db,
@@ -382,59 +345,22 @@ void store_load_day(const char *day, day_log_t *out) {
         e->slot   = sqlite3_column_int64(st, 3);
     }
     sqlite3_finalize(st);
-
-    sqlite3_prepare_v2(g_db,
-        "SELECT start, fin FROM awake WHERE day = ?1 ORDER BY start;", -1, &st, NULL);
-    sqlite3_bind_text(st, 1, day, -1, SQLITE_STATIC);
-    while (sqlite3_step(st) == SQLITE_ROW && out->awake_len < AWAKE_MAX) {
-        out->awake[out->awake_len++] = (awake_win_t){
-            .start = sqlite3_column_int64(st, 0),
-            .fin   = sqlite3_column_int64(st, 1),
-        };
-    }
-    sqlite3_finalize(st);
 }
 ```
-
-**Awake windows** get an upsert, because the tick extends the current window every second and we do not want a row per second:
-
-```c
-void store_mark_awake(time_t now) {
-    static const char *SQL =
-        "INSERT INTO awake (day, start, fin) VALUES (?1, ?2, ?2)"
-        // Extend the open window if the last tick was recent; a longer gap
-        // means the board was off, so we let a new row be inserted instead.
-        " ON CONFLICT (day, start) DO UPDATE SET fin = ?2;";
-    ...
-}
-```
-
-The board holds today's `start` in RAM so it knows which row to update; on boot, or after a gap longer than `AWAKE_GAP_SEC`, it starts a new one. That gap rule is the whole of §3.4 and is unchanged by the move to SQL.
 
 **Retention** is one statement on boot instead of a key-scanning prune:
 
 ```sql
 DELETE FROM events WHERE day < date('now', 'localtime', '-400 days');
-DELETE FROM awake  WHERE day < date('now', 'localtime', '-400 days');
 ```
 
-400 days rather than 14: SQLite makes keeping history nearly free, and a year plus a margin is what makes §13's queries possible later without a migration.
+400 days rather than 14, because the cost is negligible: roughly 30 events/day × ~80 bytes/row (SQLite row overhead plus the text columns) is ~2.4KB/day, so 400 days is under 1MB against 16MB of flash. The number is "basically free," chosen to set up the historical queries in §13 without a later retention change, not because 400 is meaningful in itself.
 
-### 3.6 Reconciling the web app
+### 3.5 The web app is a stateless remote
 
-There is one writer of record — the board — so there is no merge algorithm to write. When the web app is offline it holds unsent taps in an outbox and replays them on reconnect. The `UNIQUE (action, slot)` constraint absorbs whatever arrives twice.
+An earlier draft had the web app hold an outbox of taps logged while the board was unreachable, replaying them on reconnect — reconciliation machinery for a client that isn't really a second writer, just a thin remote.
 
-```ts
-// The entire offline story. Replay is safe at any multiplicity.
-async function flushOutbox(board: Backend) {
-  for (const ev of [...outbox]) {
-    await board.log(ev);        // INSERT OR IGNORE on the board
-    outbox.remove(ev);
-  }
-}
-```
-
-Only the board writes `awake` rows. A browser tab being open says nothing about whether the user was prompted, and a laptop left open at 03:00 must not turn the night into missed slots.
+**Removed.** `Board.log()` (§8.3) calls `POST /event` directly and reports success or failure. If the board is unreachable, the tap fails and the UI shows that plainly — no local queue, no retry-on-reconnect logic, nothing held in the browser that outlives the page. This is simpler to reason about and loses little: `UNIQUE (action, slot)` on the board already makes a stray retry harmless, so there was never much for client-side cleverness to protect against.
 
 ---
 
@@ -448,9 +374,9 @@ Four FreeRTOS tasks. Everything that mutates the log funnels through one of them
 │   1 Hz tick │               │ touch + key │
 └──────┬──────┘               └──────┬──────┘
        │                             │ input_done() / input_skip()   §7.4
-       │ store_mark_awake            ▼
+       │                             ▼
        │                    ┌─────────────────┐      ┌──────────┐
-       └───────────────────►│ day_apply_event │─────►│ feedback │ sound + haptic
+       └───────────────────►│ day_apply_event │─────►│ feedback │ sound
                             │  ← ONLY writer  │      └──────────┘
                             └────────┬────────┘
                                      │
@@ -474,7 +400,7 @@ Four FreeRTOS tasks. Everything that mutates the log funnels through one of them
 // The choke point. Everything that logs an event comes through here.
 // Returns true if this was new, false if we already had it.
 bool day_apply_event(const log_event_t *ev) {
-    bool is_new = store_add_event(ev);      // INSERT OR IGNORE, §3.5
+    bool is_new = store_add_event(ev);      // INSERT OR IGNORE, §3.4
 
     if (!is_new) return false;              // duplicate: nothing changed, stay quiet
 
@@ -499,10 +425,10 @@ Reloading the whole day from SQLite after each insert rather than patching the i
 
 Runs on the board, in C, at 1 Hz. One timer, not one per action.
 
-- Each tick marks the board awake and asks `derive` what is due.
+- Each tick asks `derive` what is due.
 - **Doing an action early resets its timer from now**, so getting ahead pushes the next slot out rather than being penalised.
 - **Missed slots do not stack.** This is not enforced; it is a consequence of `derive` visiting each slot exactly once.
-- **Jittered start offsets** (§2.1) keep the three interval actions from aligning.
+- No jitter. Collisions are shown, not avoided — see §6.
 
 ### 5.1 Slot arithmetic
 
@@ -544,29 +470,20 @@ static void scheduler_task(void *arg) {
         time_t now = time(NULL);
 
         if (!day_is_today(&g_day, now)) {        // rollover, §11.2
-            store_close_awake(now);
             day_init(&g_day, now);
         }
-
-        store_mark_awake(now);                   // §3.4 — the same write that
-                                                 // makes misses correct
 
         if (in_working_hours(now, &g_settings)) {
             day_view_t v;
             derive(&g_day, now, &g_settings, &v);
-            for (int i = 0; i < v.n_due; i++) {
-                if (!queue_contains(v.due[i]) && !is_snoozed(v.due[i], now)) {
-                    queue_push(v.due[i]);
-                    ui_raise_prompt();           // wakes screen, sound, haptics
-                }
-            }
+            card_sync(v.due, v.n_due, now);      // §6 — reconciles the checklist card
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }
 ```
 
-The tick writes no tallies and rolls nothing forward — `derive` owns all of that. All it does is mark presence and raise prompts.
+The tick writes no tallies and rolls nothing forward — `derive` owns all of that. All it does is raise prompts.
 
 ### 5.3 Completing early
 
@@ -586,38 +503,77 @@ time_t current_or_next_slot(action_id_t id) {
 
 ---
 
-## 6. Prompt queue
+## 6. The prompt card — a checklist, not a queue
 
-Collisions are common: stand (40m), water (45m) and roll (60m) align exactly every 6 hours and near-align constantly.
+Collisions are common: stand (40m), water (45m) and roll (60m) align exactly every 6 hours and near-align constantly — and with jitter removed (§2.1) they collide even more freely than before, on purpose.
 
-- Prompts **queue**; only one card is visible at a time.
-- The card shows `1 OF n` when more are waiting.
-- **Done** logs the action and advances to the next in the queue.
-- **Skip this one** logs an explicit skip for that action only and advances.
-- **Delay all 15 min** clears the entire queue. A meeting blocks everything, so one tap covers all of it. Repeatable, never stacks.
-- **X (top right)** dismisses the whole queue and returns to the grid. Present on every overlay including mid-stretch.
+**An earlier draft answered one prompt at a time from a queue** — a card per action, `1 OF n`, Done advancing to the next. That treated a collision as a sequence of interruptions to get through. The revision treats it as what it actually is: several things are true at once, so show them at once.
 
-Stretches never merge into a collision group. If stretches collide with anything, stretches take priority and the rest are dropped from the queue — they need no bookkeeping now that misses are derived, and they re-raise on the next tick if still due after the set.
+- **One card, one row per currently-due action** — icon, name, a checkbox. Nothing is hidden behind a "next" tap.
+- **Tapping a row toggles its checkbox.** Nothing is logged yet.
+- **Confirm** logs `done` for every checked row in one commit, and removes those rows from the card. Unchecked rows stay on the card — they are still due and unanswered, not skipped.
+- **Skip**, on each row individually, logs a `skip` for just that action and removes the row. It is deliberately not part of the checkbox/Confirm flow: ticking a box means "I did this," and skip is a separate, smaller decision that should not be batchable by accident.
+- **Delay all 15 min** snoozes every action currently on the card — checked or not — and clears it. Absolute, not additive, so mashing the button never pushes anything past now + 15.
+- **X** dismisses the card. Nothing is logged. The dot states in §7.2 distinguish *decided against* from *never answered*; closing the card is neither, so it must not consume any slot — including ones that were checked but never confirmed.
+
+Stretches never join the checklist. If a stretch is due alongside anything else, the stretch takes the screen on its own (§7.6) and everything else stays on the card, waiting.
 
 ```c
-void queue_delay_all(time_t now) {
-    // One tap covers the whole meeting. Snoozing is absolute, not additive,
-    // so mashing the button never pushes anything past now + 15.
+// firmware/main/card.c
+// Reconciles the card against `derive`'s due set every tick. Rows are
+// additive and sticky: a row that's still due keeps whatever checked
+// state the user gave it; a row no longer due (answered elsewhere, e.g.
+// a grid-tile tap) simply disappears.
+void card_sync(const action_id_t *due, int n_due, time_t now) {
+    // Drop rows no longer due.
+    for (int i = g_card_len - 1; i >= 0; i--) {
+        if (!in_list(due, n_due, g_card[i].action)) card_remove(i);
+    }
+    // Add newly-due rows, unchecked.
+    for (int i = 0; i < n_due; i++) {
+        if (!card_contains(due[i])) card_push(due[i], /* checked */ false);
+    }
+
+    bool has_stretch = false;
+    for (int i = 0; i < g_card_len; i++) has_stretch |= ACTIONS[g_card[i].action].flow == FLOW_STRETCH;
+    if (has_stretch) { card_take_stretch(); return; }   // stretch pre-empts, §7.6
+
+    if (g_card_len > 0) ui_show_card();
+}
+
+void card_toggle(int row) { g_card[row].checked = !g_card[row].checked; ui_refresh_card(); }
+
+void card_confirm(void) {
+    for (int i = g_card_len - 1; i >= 0; i--) {
+        if (g_card[i].checked) { input_done(g_card[i].action); card_remove(i); }
+    }
+    if (g_card_len == 0) ui_show_grid();
+}
+
+void card_skip_row(int row) {
+    input_skip(g_card[row].action);
+    card_remove(row);
+    if (g_card_len == 0) ui_show_grid();
+}
+
+void card_delay_all(time_t now) {
     time_t until = now + 15 * 60;
-    for (int i = 0; i < g_queue_len; i++) g_day.snoozed_until[g_queue[i]] = until;
-    g_queue_len = 0;
+    for (int i = 0; i < g_card_len; i++) g_day.snoozed_until[g_card[i].action] = until;
+    card_clear();
     ui_show_grid();
 }
 
-void queue_dismiss(void) {
-    // Not a skip and not a miss. Nothing is written; the slots re-raise on
-    // the next tick if still due.
-    g_queue_len = 0;
+void card_dismiss(void) {
+    // Not a skip and not a miss for anything on the card, checked or not.
+    // Nothing is written; card_sync rebuilds it from derive() next tick.
+    card_clear();
     ui_show_grid();
 }
 ```
 
-`dismiss` deliberately logs nothing. The dot states in §7 distinguish *decided against* from *never answered*; closing a card is neither, so it must not consume the slot.
+`card_sync` running every tick — rather than the card being built once when it opens — is what makes it correct to leave the board mid-decision: check two boxes, get pulled away, come back an hour later, and the card still reflects exactly what's actually due, with your two checks intact and nothing double-logged.
+
+**The physical key stays single-item.** Checkboxes are a touch affordance; the key's job (§7.4) is answering *something* without looking at the screen, which doesn't compose with "which boxes did I check." A key tap logs `done` for the single highest-priority due action directly, through the same `input_done` as everything else, regardless of what is or isn't checked on the card.
 
 **One edge to be aware of.** A snoozed slot that passes unanswered still derives as a miss, because `derive` only sees the *current* `snoozed_until`, not that the slot was snoozed at the time. With the shortest cadence at 40 minutes a 15-minute delay cannot span a slot boundary, so this is unreachable as configured. It becomes reachable if §11's settings screen lets a cadence go below ~15 minutes — at which point the fix is to log the snooze as an event carrying the slot it covered, not to special-case `derive`. Floor the configurable cadence at 20 minutes.
 
@@ -671,48 +627,81 @@ Skipped and missed are visually distinct because deciding not to eat lunch and f
 
 Dots render in a fixed order — done, skipped, missed, then pending padding — so a tile's dots never reshuffle as the day fills in. An overshoot (more done than the target) grows the row rather than truncating.
 
-### 7.3 Prompt screen
+### 7.3 The prompt card
 
-Tinted to the action. Large icon, name, one line of context, three buttons plus the X. Buttons sized for a thumb on a 368px panel, not a stylus.
+One screen, N rows (§6). Each row is tinted to its own action rather than the whole screen taking one tint, since a card can hold up to seven different actions at once.
 
 ```c
-static void build_prompt(action_id_t id) {
-    const action_def_t *def = &ACTIONS[id];
+// firmware/main/ui_card.c
+static lv_obj_t *g_scr, *g_rows[MAX_CARD_ROWS];
 
-    lv_obj_t *scr = lv_obj_create(NULL);
-    lv_obj_set_style_bg_color(scr, lv_color_hex(def->tint_dim), 0);
+void ui_show_card(void) {
+    if (!g_scr) g_scr = lv_obj_create(NULL);
+    lv_obj_clean(g_scr);
 
-    lv_obj_t *done = lv_btn_create(scr);
-    lv_obj_set_size(done, 300, 96);
-    lv_obj_align(done, LV_ALIGN_CENTER, 0, 40);
-    lv_obj_set_style_bg_color(done, lv_color_hex(def->tint), 0);
-    lv_obj_add_event_cb(done, on_done_cb, LV_EVENT_CLICKED, (void *)(intptr_t)id);
-    /* … skip, delay-all, X … */
+    for (int i = 0; i < g_card_len; i++) {
+        const action_def_t *def = &ACTIONS[g_card[i].action];
 
-    lv_scr_load_anim(scr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+        lv_obj_t *row = lv_obj_create(g_scr);
+        lv_obj_set_size(row, 320, 64);
+        lv_obj_set_style_bg_color(row, lv_color_hex(def->tint_dim), 0);
+
+        lv_obj_t *check = lv_checkbox_create(row);
+        lv_checkbox_set_text(check, def->name);
+        lv_obj_add_state(check, g_card[i].checked ? LV_STATE_CHECKED : 0);
+        lv_obj_add_event_cb(check, on_row_toggle_cb, LV_EVENT_VALUE_CHANGED, (void *)(intptr_t)i);
+
+        lv_obj_t *skip = lv_btn_create(row);
+        lv_obj_align(skip, LV_ALIGN_RIGHT_MID, -8, 0);
+        lv_obj_add_event_cb(skip, on_row_skip_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
+
+        g_rows[i] = row;
+    }
+
+    ui_x_button_attach(g_scr, on_dismiss_cb);          // §7.3a — one shared X
+    build_confirm_bar(g_scr);                          // Confirm + Delay-all-15
+
+    lv_scr_load_anim(g_scr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
 }
 
-static void on_done_cb(lv_event_t *e) {
-    action_id_t id = (action_id_t)(intptr_t)lv_event_get_user_data(e);
-    on_done(id);                    // → day_apply_event → persist → ws_broadcast
-    haptic_pulse(25);
-    audio_cue(CUE_SUCCESS);
-    queue_advance();                // next card, or back to the grid
-    idle_timer_reset();             // screen goes dark 20s from now
+static void on_row_toggle_cb(lv_event_t *e) { card_toggle((int)(intptr_t)lv_event_get_user_data(e)); }
+static void on_row_skip_cb(lv_event_t *e)   { card_skip_row((int)(intptr_t)lv_event_get_user_data(e)); }
+static void on_confirm_cb(lv_event_t *e)    { card_confirm(); }
+static void on_delay_cb(lv_event_t *e)      { card_delay_all(time(NULL)); }
+static void on_dismiss_cb(lv_event_t *e)    { card_dismiss(); }
+```
+
+A single due action still renders as this same one-row card rather than reverting to a dedicated single-prompt screen — one component, always, so there is nothing separate to keep in sync.
+
+### 7.3a One X, one component
+
+The X — close, no-op, top right — appears on the grid's overlays, the card, and mid-stretch, and it must look and behave identically everywhere it appears rather than being three implementations that happen to agree today and drift tomorrow.
+
+```c
+// firmware/main/ui_common.c — the only place an X is built
+void ui_x_button_attach(lv_obj_t *parent, lv_event_cb_t on_close) {
+    lv_obj_t *x = lv_btn_create(parent);
+    lv_obj_set_size(x, 44, 44);                          // fixed, everywhere
+    lv_obj_align(x, LV_ALIGN_TOP_RIGHT, -8, 8);           // fixed, everywhere
+    lv_obj_set_style_bg_opa(x, LV_OPA_TRANSP, 0);
+    lv_label_set_text(lv_label_create(x), LV_SYMBOL_CLOSE);
+    lv_obj_add_event_cb(x, on_close, LV_EVENT_CLICKED, NULL);
 }
 ```
+
+`ui_show_grid()`, called from every `on_close` above, is the one line that switches the active LVGL screen back to the seven-tile grid — the default view everything else returns to.
 
 ### 7.4 Inputs
 
-Four ways to answer a prompt, and **all four end at the same two functions**. Nothing else in the firmware writes an event.
+Four ways to answer, and **all four end at the same two functions**. Nothing else in the firmware writes an event.
 
 ```
-touch: Done button   ─┐
-touch: grid tile     ─┤
-physical key         ─┼──► input_done(action)  ──► day_apply_event()
-IMU tap (optional)   ─┘                              ▲
-                                                     │
-web app: POST /event ────────────────────────────────┘
+touch: card row + Confirm ─┐
+touch: grid tile          ─┤
+physical key               ─┼──► input_done(action)  ──► day_apply_event()
+IMU tap (optional)        ─┘                              ▲
+                                                          │
+web app: POST /event ─────────────────────────────────────┘
 ```
 
 ```c
@@ -729,9 +718,8 @@ void input_done(action_id_t id) {
     uuid_v4(ev.id);
 
     if (day_apply_event(&ev)) {                // false = we already had it
-        feedback_play(CUE_SUCCESS);            // sound + haptic, §9
+        feedback_play(CUE_SUCCESS);            // sound only — §9
     }
-    queue_advance();                           // next card, or back to the grid
     idle_timer_reset();                        // screen goes dark 20s from now
 }
 
@@ -741,21 +729,13 @@ void input_skip(action_id_t id) {
     uuid_v4(ev.id);
     day_apply_event(&ev);
     feedback_play(CUE_READY);
-    queue_advance();
     idle_timer_reset();
 }
 ```
 
-Gating the cue on `day_apply_event`'s return is a small thing that matters in use: a double-tap on Done should chime once, not twice. The second tap is deduplicated by the `UNIQUE` constraint, and the silence tells the user it did not count twice.
+Gating the cue on `day_apply_event`'s return is a small thing that matters in use: confirming a card that includes an already-answered row should chime once for what actually landed, not once per row. The duplicate is caught by the `UNIQUE` constraint, and the silence for that row tells nothing new happened.
 
-**Touch — prompt buttons.** LVGL callbacks are one line each.
-
-```c
-static void on_done_cb(lv_event_t *e)  { input_done((action_id_t)(intptr_t)lv_event_get_user_data(e)); }
-static void on_skip_cb(lv_event_t *e)  { input_skip((action_id_t)(intptr_t)lv_event_get_user_data(e)); }
-static void on_delay_cb(lv_event_t *e) { queue_delay_all(time(NULL)); feedback_play(CUE_READY); }
-static void on_close_cb(lv_event_t *e) { queue_dismiss(); }
-```
+Note `input_done`/`input_skip` no longer advance a queue — §6's `card_confirm`/`card_skip_row`/`card_dismiss` own screen transitions, since a card can hold several rows and confirming doesn't necessarily mean the card is empty.
 
 **Touch — grid tiles.** Tapping a tile logs that action with no prompt, which is the "I just drank a glass, credit me" path. Same function, so it re-anchors the timer exactly as answering a prompt would.
 
@@ -781,7 +761,7 @@ BOOT being a strapping pin is worth knowing but not disqualifying: it only matte
 
 `GPIO0` is RTC-capable on the ESP32-S3, which is what makes the `ext1` wake in §10 work.
 
-One press = Done on the current prompt, which is what you want when the prompt is "stand up" and you are already standing — you can answer it without looking.
+One press logs Done for the single highest-priority due action, which is what you want when the prompt is "stand up" and you are already standing — you can answer it without looking, independent of whatever is or isn't checked on the card (§6).
 
 ```c
 // firmware/main/key.c
@@ -812,8 +792,8 @@ static void key_task(void *arg) {
                 wake_screen();                          // show the state briefly
             } else if (screen_is_dark()) {
                 wake_screen();                          // first tap only wakes
-            } else if (g_queue_len > 0) {
-                input_done(g_queue[0]);                 // tap = done
+            } else if (g_card_len > 0) {
+                input_done(g_card[0].action);           // tap = done, top priority
             }
         }
         was_down = down;
@@ -829,26 +809,17 @@ void input_toggle_sound(void) {
     store_set_setting("sound", g_settings.sound ? "1" : "0");   // survives reboot
 
     // Order matters. feedback_play() gates audio on g_settings.sound, so
-    // flipping the setting first means the confirmation is automatically
-    // audible when switching ON and silent when switching OFF — no special
-    // case, and never a chirp from a board you just muted.
-    feedback_play(g_settings.sound ? CUE_SOUND_ON : CUE_SOUND_OFF);
+    // flipping the setting first means this call is naturally silent when
+    // switching sound off — no special case, and no chirp from a board you
+    // just muted. There is no off-cue at all; the icon (§7.5) carries that half.
+    if (g_settings.sound) feedback_play(CUE_SOUND_ON);
 
     ui_sound_icon_update();                  // the icon is the state, §7.5
     ws_broadcast_state();                    // the web app's icon follows
 }
 ```
 
-**Why the haptic carries this one.** Every other confirmation on the device can be a sound. This one cannot: the whole point of muting is that you stop hearing things, so the acknowledgement has to arrive through a different channel or the gesture feels like it did nothing. The two patterns are deliberately distinguishable without looking:
-
-| | Haptic | Sound |
-|---|---|---|
-| Sound **on** | two quick pulses `30, 60, 30` | plus an audible chirp — you can hear it again |
-| Sound **off** | one long pulse `160` | none, by definition |
-
-Long and single reads as "closed"; short and double reads as "open". You can tell which state you landed in with the board face-down.
-
-Haptics stay on when sound is off — that is the point of the feature. A muted board still taps you on the desk when a prompt arrives.
+**The confirmation is visual, not haptic.** An earlier draft added a vibration motor specifically to confirm the mute-off case, on the reasoning that muting can't confirm itself with sound. **Removed** — this board does not ship with a motor, and adding one is a real hardware change (BOM, wiring, enclosure) that shouldn't be pulled in for one gesture. The icon's visual pulse (§7.5), already built for exactly this purpose, carries it instead: switching sound off dims and swaps the icon and pulses it once; switching on does the same plus a chirp, since by then you can hear it again. The one honest tradeoff: unlike a haptic, the visual confirmation only lands if you're looking at the board when you release the key — acceptable, since the icon's steady state (§7.5) tells you the same thing at a glance a moment later regardless.
 
 **What this costs.** The key previously carried `delay all 15`; sound now owns the hold. Delay-all is touch-only, which is the right trade — muting is the gesture you want blind and in a hurry, and delay-all is one you make while already looking at a card. If you want it back on the key later, a double-tap is free and unambiguous next to a hold.
 
@@ -860,10 +831,10 @@ Confirm the touch controller part against the schematic for your board revision 
 
 ```c
 static void imu_tap_isr(void *arg) {
-    // Only ever answers a prompt that is already on screen. A tap must never
+    // Only ever answers something already on the card. A tap must never
     // be able to log something the user was not being asked about — the
     // false-positive rate on desk knocks is far too high for that.
-    if (g_queue_len == 0 || !g_settings.imu_tap) return;
+    if (g_card_len == 0 || !g_settings.imu_tap) return;
     xQueueSendFromISR(g_input_q, &(input_msg_t){ .kind = INPUT_TAP }, NULL);
 }
 ```
@@ -928,18 +899,31 @@ Abandoning the set part-way logs a `skip`, not a partial `done` — a half-finis
 
 ## 8. Web app
 
-A viewer and a remote. It renders `DayView` from the board's `DayLog` using the same `derive`, and it can log a completion. **It has no scheduler and raises no prompts.**
+A viewer and a remote. It renders the `DayView` the board already derived (§3.3) and can log a completion. **It has no scheduler and raises no prompts.**
+
+### 8.0 One frontend, a small backend contract
+
+Stated as an explicit architectural rule rather than left as an accident of how §8.2/8.3 happen to be written: **the React app is the one frontend**, and everything it talks to — the board today, potentially something else later — implements the same small contract: `GET /state`, `POST /event`, `POST /settings`, `GET /ws`. The frontend doesn't know or care what's behind that contract; it only knows the shapes in §8.1.
+
+This is what "I might want to host this on an app or a website in the future" (the reason WiFi is worth keeping at all — §1, §12) actually costs to support, which is close to nothing extra:
+
+- **A website** is the same static build, deployed anywhere, still pointed at `wfh.local` on the same LAN — or, if remote access is ever wanted, at a relay that speaks the same three-endpoint-plus-socket contract. Nothing in the frontend changes; only where it's served from does.
+- **A native app** is the same build wrapped in a WebView shell (Capacitor or similar). It's still a client of the same HTTP/WS API, so the board's firmware doesn't change either.
+- **A different backend entirely** — say, a pure-web version with no board, storing to `localStorage` or a small server — is a new implementation of the same four endpoints, not a new frontend.
+
+**The board's own screen is not this frontend.** §7 established that literal React can't run on the ESP32-S3 at the touch latency this needs, so the board's LVGL/C screens are a second, necessarily separate renderer of the same underlying data (`DayView` plus the action config) — not a second frontend, and not something that should grow its own opinions about layout or copy that the web app doesn't share. Keep the two in sync by sharing the source of meaning (§2.1's generated config, §3's `DayView` shape), not by trying to share code that can't actually run in both places.
 
 ### 8.1 The protocol
 
-Three endpoints and one socket. Everything is JSON; nothing is versioned beyond the `version` field in the payload, because both ends ship together.
+A handful of endpoints and one socket. Everything is JSON; nothing is versioned beyond the `version` field in the payload, because both ends ship together.
 
 | | | |
 |---|---|---|
 | `GET /state` | → `{ log, view, power }` | full snapshot, used once on load |
 | `POST /event` | `{ action, kind, ts, slot }` → `{ ok, applied }` | log a completion |
-| `POST /settings` | `{ sound?, haptics? }` → `{ ok }` | flip a toggle from the browser |
+| `POST /settings` | `{ sound?, volume? }` → `{ ok }` | flip a toggle from the browser |
 | `GET /ws` | ← `{ type: 'state', … }` | push on every change |
+| `GET /logs` | → last 24h of device log lines | debugging, §14 |
 | `GET /` | → the web app itself | static files from LittleFS |
 
 **The snapshot.** One shape, sent by both `GET /state` and every WebSocket push, so the client has exactly one code path for "here is the world".
@@ -947,7 +931,7 @@ Three endpoints and one socket. Everything is JSON; nothing is versioned beyond 
 ```jsonc
 {
   "type": "state",
-  "log":  { "version": 2, "date": "2026-08-14", "events": [ … ], "awake": [ … ] },
+  "log":  { "version": 3, "date": "2026-08-14", "events": [ … ] },
   "view": {                                  // derived on the board, §3.3
     "counts":  { "water": 3, "stand": 4 },
     "skipped": { "stand": 1 },
@@ -956,8 +940,8 @@ Three endpoints and one socket. Everything is JSON; nothing is versioned beyond 
     "due":     ["water"]
   },
   "power":    { "battPct": 82, "charging": true, "onBattery": false },
-  "settings": { "sound": true, "haptics": true },   // so the web toggle follows
-                                                    // a hold on the board, §7.4
+  "settings": { "sound": true, "volume": 70 },   // so the web toggle/slider
+                                                 // follows a hold on the board, §7.4
   "now": 1723645200                          // board clock, for countdown skew
 }
 ```
@@ -1018,17 +1002,28 @@ static esp_err_t settings_post(httpd_req_t *req) {
 
     cJSON *root = cJSON_Parse(buf);
     cJSON *sound = cJSON_GetObjectItem(root, "sound");
+    cJSON *volume = cJSON_GetObjectItem(root, "volume");
 
     if (cJSON_IsBool(sound) && cJSON_IsTrue(sound) != g_settings.sound) {
         input_toggle_sound();     // same path as the key hold and the icon tap:
-                                  // persists, buzzes, updates the icon, rebroadcasts
+                                  // persists, updates the icon, rebroadcasts
     }
-    /* … haptics … */
+    if (cJSON_IsNumber(volume)) {
+        g_settings.volume = volume->valueint;
+        store_set_setting("volume", int_to_str(g_settings.volume));
+        ws_broadcast_state();
+    }
     cJSON_Delete(root);
     return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 // ── GET /ws ──────────────────────────────────────────────────────────────
+// 4 is neither tight nor generous — realistic concurrent viewers are 1, maybe
+// 2 (phone + laptop open at once), and each open socket costs a small fixed
+// buffer against 8MB of PSRAM, so this has headroom without being large
+// enough to matter for memory. Exceeding it logs a warning and drops the new
+// connection (below) rather than failing anything, so the cost of guessing
+// wrong is "can't open a 5th tab," not a crash.
 #define WS_MAX_CLIENTS 4
 static int g_ws_fds[WS_MAX_CLIENTS];
 
@@ -1087,10 +1082,11 @@ void api_start(void) {
         { .uri = "/state",    .method = HTTP_GET,  .handler = state_get    },
         { .uri = "/event",    .method = HTTP_POST, .handler = event_post   },
         { .uri = "/settings", .method = HTTP_POST, .handler = settings_post },
+        { .uri = "/logs",     .method = HTTP_GET,  .handler = logs_get    },  // §14
         { .uri = "/ws",       .method = HTTP_GET,  .handler = ws_handler, .is_websocket = true },
         { .uri = "/*",        .method = HTTP_GET,  .handler = static_get   },  // the web app
     };
-    for (int i = 0; i < 5; i++) httpd_register_uri_handler(g_server, &routes[i]);
+    for (int i = 0; i < 6; i++) httpd_register_uri_handler(g_server, &routes[i]);
 
     ESP_ERROR_CHECK(mdns_init());
     ESP_ERROR_CHECK(mdns_hostname_set("wfh"));            // → wfh.local
@@ -1100,9 +1096,9 @@ void api_start(void) {
 
 **Serve the web app from the board.** `http://wfh.local` talking to `http://wfh.local` sidesteps the mixed-content block that would stop an HTTPS-hosted page from reaching the board over plain HTTP. The built bundle goes on the LittleFS partition and is served by `static_get`; at a few hundred KB it fits comfortably in 16MB alongside the firmware and the database.
 
-### 8.3 Web app side
+### 8.3 Web app side — a stateless remote
 
-One class. It owns the socket, the reconnect, the clock skew and the outbox, and it hands the rest of the app a plain snapshot.
+One class, and it holds no local write state at all: no outbox, no optimistic update. It owns the socket, the reconnect, and the clock skew, and it hands the rest of the app a plain snapshot.
 
 ```ts
 // web/src/board.ts
@@ -1111,7 +1107,6 @@ type Snapshot = { log: DayLog; view: DayView; power: Power; now: number };
 export class Board {
   private ws?: WebSocket;
   private backoff = 1000;                       // grows to 30s, resets on connect
-  private outbox: LogEvent[] = [];
   skew = 0;                                     // board clock − browser clock
   online = false;
 
@@ -1121,11 +1116,7 @@ export class Board {
   start() {
     this.ws = new WebSocket(`ws://${this.host}/ws`);
 
-    this.ws.onopen = () => {
-      this.online = true;
-      this.backoff = 1000;
-      this.flushOutbox();                       // replay anything logged offline
-    };
+    this.ws.onopen = () => { this.online = true; this.backoff = 1000; };
 
     this.ws.onmessage = e => this.receive(JSON.parse(e.data));
 
@@ -1148,38 +1139,24 @@ export class Board {
   }
 
   // ── log a completion ───────────────────────────────────────────────────
-  async log(action: ActionId, kind: EventKind, slot: number) {
+  // No optimistic update, no outbox. Success or failure is reported to the
+  // caller directly; a failed tap is the caller's problem to surface (§6's
+  // checklist card leaves the row checked and shows an inline error rather
+  // than silently queueing the tap for later).
+  async log(action: ActionId, kind: EventKind, slot: number): Promise<boolean> {
     const ev: LogEvent = {
       id: crypto.randomUUID(), action, kind, slot,
       ts: this.boardNow(), source: 'web',
     };
-
-    // Optimistic: bump the tile now, so the tap feels instant. The board's
-    // push will overwrite this within a few milliseconds if it lands.
-    this.onSnapshot(applyOptimistic(this.last!, ev));
-
     try {
       const r = await fetch(`http://${this.host}/event`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(ev),
       });
-      if (!r.ok) throw new Error(String(r.status));
+      return r.ok;                              // the WS push updates the view
     } catch {
-      this.outbox.push(ev);                     // retried on next connect
-    }
-  }
-
-  private async flushOutbox() {
-    for (const ev of [...this.outbox]) {
-      try {
-        await fetch(`http://${this.host}/event`, {
-          method: 'POST',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify(ev),
-        });
-        this.outbox.splice(this.outbox.indexOf(ev), 1);
-      } catch { return; }                       // still down; try again later
+      return false;
     }
   }
 
@@ -1202,7 +1179,7 @@ export class Board {
 }
 ```
 
-The optimistic update is what makes a tap on the laptop feel like a tap on the board. It is safe to be wrong: the authoritative snapshot arrives moments later and replaces it wholesale, and if the request failed the outbox retries it. Nothing needs to be rolled back by hand.
+Without an optimistic update, a tap on the laptop lands a beat later than a tap on the board — the round trip to `POST /event` plus the WS push back. That's an accepted, honest cost of statelessness: the alternative was a client that pretends to know things it doesn't yet, and unwinding that pretense on failure was exactly the machinery §3.5 removed.
 
 The UI layer — grid, tiles, wash, grain, dots — is the reviewed prototype, unchanged. It reads `DayView` and does not care where the log came from.
 
@@ -1248,10 +1225,10 @@ The UI layer — grid, tiles, wash, grain, dots — is the reviewed prototype, u
 
 ### 8.4 When the board is away
 
-Asleep, off the LAN, or flat — all indistinguishable from a closed socket, and the client does not need to tell them apart. `Board` keeps the last snapshot, keeps accepting taps into the outbox, and reconnects with backoff. The UI shows a plain marker and stops the countdowns, which would otherwise tick down to zero and lie.
+Asleep, off the LAN, or flat — all indistinguishable from a closed socket, and the client does not need to tell them apart. `Board` keeps the last snapshot and reconnects with backoff. The UI shows a plain marker, disables logging, and stops the countdowns, which would otherwise tick down to zero and lie.
 
 ```tsx
-{!board.online && <div className="banner">Board offline — taps will sync when it returns</div>}
+{!board.online && <div className="banner">Board offline — nothing can be logged until it returns</div>}
 ```
 
 The header carries the same sound icon as the board (§7.5), driven by the same state and reaching the same function:
@@ -1270,56 +1247,39 @@ The header carries the same sound icon as the board (§7.5), driven by the same 
 
 ## 9. Feedback
 
-Three cues, matching the reviewed prototype's vocabulary. Both channels fire together and both are driven from one table, so a cue is defined in exactly one place.
+Four cues, matching the reviewed prototype's vocabulary, all sound — no motor is fitted on this board, so there is one channel, not two (§7.4).
 
-| Event | Sound | Haptic |
-|---|---|---|
-| Prompt appears | `bloom` — rising two-note | triple pulse |
-| Action logged | `success` — quick up-tick | short tick |
-| Stretch step complete | `ready` — single soft note | light tick |
-| Sound switched **on** | `success` — proof you can hear it | two quick pulses |
-| Sound switched **off** | *(none — that is the point)* | one long pulse |
+| Event | Sound |
+|---|---|
+| Prompt appears | `bloom` — rising two-note |
+| Action logged | `success` — quick up-tick |
+| Stretch step complete | `ready` — single soft note |
+| Sound switched **on** | `success` — proof you can hear it |
+| Sound switched **off** | *(none — visual only, §7.5)* |
 
 ```c
 // firmware/main/feedback.h
-typedef enum {
-    CUE_BLOOM, CUE_SUCCESS, CUE_READY,
-    CUE_SOUND_ON, CUE_SOUND_OFF,        // hold-to-mute confirmations, §7.4
-    CUE_COUNT
-} cue_t;
+typedef enum { CUE_BLOOM, CUE_SUCCESS, CUE_READY, CUE_SOUND_ON, CUE_COUNT } cue_t;
 
-void feedback_play(cue_t cue);      // sound + haptic together, non-blocking
+void feedback_play(cue_t cue);      // non-blocking
 ```
 
 ```c
 // firmware/main/feedback.c — the one table
-typedef struct {
-    const tone_t   *tones;   int n_tones;
-    const uint16_t *buzz;    int n_buzz;    // alternating on/off ms
-} cue_def_t;
-
 static const tone_t BLOOM[]   = { {523, 90}, {659, 140} };        // C5 → E5
 static const tone_t SUCCESS[] = { {659, 70}, {880, 110} };        // E5 → A5
 static const tone_t READY[]   = { {440, 120} };                   // A4
 
-static const uint16_t BUZZ_PROMPT[]  = { 40, 60, 40, 60, 40 };
-static const uint16_t BUZZ_DONE[]    = { 25 };
-static const uint16_t BUZZ_LIGHT[]   = { 12 };
-static const uint16_t BUZZ_ON[]      = { 30, 60, 30 };   // two pulses: "open"
-static const uint16_t BUZZ_OFF[]     = { 160 };          // one long:   "closed"
-
 static const cue_def_t CUES[CUE_COUNT] = {
-    [CUE_BLOOM]      = { BLOOM,   2, BUZZ_PROMPT, 5 },
-    [CUE_SUCCESS]    = { SUCCESS, 2, BUZZ_DONE,   1 },
-    [CUE_READY]      = { READY,   1, BUZZ_LIGHT,  1 },
-    [CUE_SOUND_ON]   = { SUCCESS, 2, BUZZ_ON,     3 },
-    [CUE_SOUND_OFF]  = { NULL,    0, BUZZ_OFF,    1 },   // silent by construction
+    [CUE_BLOOM]     = { BLOOM,   2 },
+    [CUE_SUCCESS]   = { SUCCESS, 2 },
+    [CUE_READY]     = { READY,   1 },
+    [CUE_SOUND_ON]  = { SUCCESS, 2 },
+    // no CUE_SOUND_OFF: muting is confirmed by the icon's pulse, not a sound
 };
 
 void feedback_play(cue_t cue) {
-    // Haptics are independent of sound: a muted board still taps the desk.
-    if (g_settings.sound && CUES[cue].n_tones) audio_play(CUES[cue].tones, CUES[cue].n_tones);
-    if (g_settings.haptics)                    haptic_play(CUES[cue].buzz,  CUES[cue].n_buzz);
+    if (g_settings.sound) audio_play(CUES[cue].tones, CUES[cue].n_tones);
 }
 ```
 
@@ -1382,71 +1342,14 @@ Two things worth keeping: the queue means `feedback_play` never blocks a touch h
 
 ```c
 // In the scheduler tick.
-if (g_queue_len > 0 && now - g_prompt_raised_at == 120) {
+if (g_card_len > 0 && now - g_card_raised_at == 120) {
     audio_set_volume(g_settings.volume + 15);
     feedback_play(CUE_BLOOM);
     audio_set_volume(g_settings.volume);
 }
 ```
 
-### 9.2 Haptics
-
-An ERM or LRA motor on a PWM (LEDC) pin through a small driver transistor. **The board does not have one fitted** — this is an added component on a spare GPIO, so budget for it in the enclosure.
-
-```c
-// firmware/main/haptic.c
-#define HAPTIC_GPIO      GPIO_NUM_14        // verify against your wiring
-#define HAPTIC_DUTY      180                // of 255; full duty is loud and buzzy
-
-void haptic_init(void) {
-    ledc_timer_config_t timer = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = LEDC_TIMER_8_BIT,
-        .timer_num = LEDC_TIMER_1,
-        .freq_hz = 200,                     // ERM motors like a few hundred Hz
-        .clk_cfg = LEDC_AUTO_CLK,
-    };
-    ledc_timer_config(&timer);
-
-    ledc_channel_config_t ch = {
-        .gpio_num = HAPTIC_GPIO, .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = LEDC_CHANNEL_1, .timer_sel = LEDC_TIMER_1, .duty = 0,
-    };
-    ledc_channel_config(&ch);
-
-    g_haptic_q = xQueueCreate(4, sizeof(haptic_msg_t));
-    xTaskCreate(haptic_task, "haptic", 2048, NULL, 5, NULL);
-}
-
-static void motor(bool on) {
-    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1, on ? HAPTIC_DUTY : 0);
-    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_1);
-}
-
-/** Pattern is alternating on/off durations in ms, starting with on. */
-static void haptic_task(void *arg) {
-    haptic_msg_t msg;
-    for (;;) {
-        if (xQueueReceive(g_haptic_q, &msg, portMAX_DELAY)) {
-            for (int i = 0; i < msg.n; i++) {
-                motor(i % 2 == 0);                        // even = on, odd = off
-                vTaskDelay(pdMS_TO_TICKS(msg.pattern[i]));
-            }
-            motor(false);      // always leave it off, even if we were interrupted
-        }
-    }
-}
-
-void haptic_play(const uint16_t *pattern, int n) {
-    haptic_msg_t msg = { .n = n };
-    memcpy(msg.pattern, pattern, n * sizeof(uint16_t));
-    xQueueSend(g_haptic_q, &msg, 0);
-}
-```
-
-Same shape as audio — its own task, its own queue, non-blocking send. The unconditional `motor(false)` at the end of each pattern is the line that stops a crash or a reset mid-pattern from leaving the motor running.
-
-### 9.3 In the web app
+### 9.2 In the web app
 
 Off by default. The board is making the noise, and a laptop echoing every cue a second time is worse than silence.
 
@@ -1456,8 +1359,6 @@ If enabled, `cuelume` (MIT, ESM, ~5kB, synthesised live, no audio files) driven 
 const unlock = () => { ctx?.resume(); document.removeEventListener('pointerdown', unlock); };
 document.addEventListener('pointerdown', unlock, { once: true });
 ```
-
-No browser haptics: `navigator.vibrate` is unsupported in iOS Safari. Feature-detect and hide the toggle rather than showing a switch that does nothing — and it costs nothing now that the board carries the haptics.
 
 ---
 
@@ -1469,13 +1370,13 @@ The board is **not** always on. On USB-C it effectively is; on battery it is not
 
 So **screen-on time is the budget, not uptime** — which suits an app that is idle 99% of the time: seven prompts an hour at most, each needing a few seconds of attention.
 
-| State | Trigger | Screen | WiFi | Serves HTTP |
-|---|---|---|---|---|
-| Active | prompt firing, or touch within 20s | on | on | yes |
-| Idle | no touch for 20s, inside working hours | off | modem-sleep (DTIM) | yes |
-| Dormant | outside working hours | off | off | no |
+| State | Trigger | Wakes on | Screen | WiFi | Serves HTTP |
+|---|---|---|---|---|---|
+| Active | prompt firing, or touch within 20s | — | on | on | yes |
+| Idle | no touch for 20s, inside working hours | any touch or key press | off | modem-sleep (DTIM) | yes |
+| Dormant | outside working hours | RTC timer (next `workStart`) or key press | off | off | no |
 
-**Idle is the important one.** Screen off with WiFi in modem-sleep keeps the TCP stack alive, so `/state` and `/ws` keep working and the web app never notices, while the panel — the actual cost — is dark.
+**Idle is the important one.** Screen off with WiFi in modem-sleep keeps the TCP stack alive, so `/state` and `/ws` keep working and the web app never notices, while the panel — the actual cost — is dark. A touch or key press takes it straight back to Active, same path as the wake sources listed for Dormant below.
 
 ```c
 esp_pm_config_t pm = {
@@ -1496,13 +1397,12 @@ static void enter_dormant(time_t work_start_tomorrow) {
     // BOOT/GPIO0 is RTC-capable, so it can wake us. PWR cannot — it is behind
     // the I/O expander, which is unpowered in deep sleep. §7.4
     esp_sleep_enable_ext1_wakeup(BIT64(KEY_GPIO), ESP_EXT1_WAKEUP_ANY_LOW);
-    store_close_awake(time(NULL));                // seal the window, §3.4
     sqlite3_close(g_db);                          // checkpoint WAL before sleep
     esp_deep_sleep_start();
 }
 ```
 
-**Running flat mid-day is a non-event.** This is the payoff from §3. The board dies at 14:00, gets plugged in at 15:30, and boots with the database intact on flash and the correct wall-clock time from the PCF85063. It opens a new awake window at 15:30, and the slots between 14:00 and 15:30 are outside every window, so they are *not* misses. The user is not blamed for a dead battery.
+**Running flat mid-day writes nothing corrupt, but it does cost misses.** The board dies at 14:00, gets plugged in at 15:30, and boots with the database intact on flash and the correct wall-clock time from the PCF85063 — no data loss, no crash. But per §3.1's simplified rule, every slot that fell between 14:00 and 15:30 is now unanswered and in the past, so it derives as missed, the same as if the board had been on the whole time and simply failed to prompt. That is the accepted cost of removing awake-window tracking: correctness of the stored data is unaffected, but the day's dot row will show a real gap. §10's own recommendation — run it on USB-C — is what keeps this rare in practice.
 
 ```c
 static void on_power_event(axp2101_event_t ev) {
@@ -1518,19 +1418,17 @@ static void on_power_event(axp2101_event_t ev) {
         idle_timeout_set(60 * 1000);
         break;
     case AXP2101_BATT_LOW:                        // ~15%
-        store_close_awake(time(NULL));             // seal while we still can
-        ui_show_battery_warning();                 // on the board, not the phone
+        ui_show_battery_warning();                 // on the board's own screen
         break;
     case AXP2101_BATT_CRITICAL:                   // ~5%
-        store_close_awake(time(NULL));
-        sqlite3_close(g_db);
+        sqlite3_close(g_db);                       // checkpoint WAL before sleep
         enter_dormant(0);                         // wake on USB only
         break;
     }
 }
 ```
 
-`store_close_awake` on the low-battery interrupt is the line that matters for correctness: it seals the window while there is still power to commit, so the database honestly records when the board stopped being able to prompt. Closing the connection on the critical interrupt checkpoints the WAL, so the next boot opens a clean database rather than replaying a journal.
+Closing the database connection on the critical interrupt checkpoints the WAL, so the next boot opens a clean database rather than replaying a journal.
 
 Expose battery in `/state` so the web app can show it and the user is never guessing:
 
@@ -1550,17 +1448,17 @@ Firmware first, because it is the product and it is the long pole. Each step sho
 
 1. **Board bring-up** — ESP-IDF project, display, touch, LVGL hello-world, WiFi, NTP-set RTC. Confirms the hardware and the toolchain before any product logic exists.
 2. **Config generation** — `actions.json` → `actions.g.h` / `actions.g.ts`, wired into the build with the CI diff check.
-3. **Storage** — LittleFS partition, SQLite, schema, `store_add_event` / `store_load_day` / `store_mark_awake`. Verifiable on its own with a serial console before any UI exists.
-4. **`derive` and `day_apply_event`** — the walk, the anchor rule, the awake test, plus the fixtures in §11.1. **This is the step to get right**; everything else is presentation.
-5. **Scheduler tick** — awake windows, jittered offsets, due detection. Testable on-desk by moving the RTC forward.
-6. **Grid UI** — tiles, dots, wash, header. First point at which the thing looks like itself.
-7. **Inputs** — prompt screens, Done / Skip / Delay-all / X, tile-tap logging, physical key (§7.4).
-8. **Sound and haptics** — the cue table, the I2S tone task, the motor task, escalation (§9).
+3. **Storage** — LittleFS partition, SQLite, schema, `store_add_event` / `store_load_day`. Verifiable on its own with a serial console before any UI exists.
+4. **`derive` and `day_apply_event`** — the walk, the anchor rule, plus the fixtures in §11.1. **This is the step to get right**; everything else is presentation.
+5. **Scheduler tick and the checklist card** (§6) — due detection, `card_sync`, Confirm/Skip/Delay-all/X. Testable on-desk by moving the RTC forward.
+6. **Grid UI** — tiles, dots, wash, header, the shared X component (§7.3a). First point at which the thing looks like itself.
+7. **Inputs** — card rows, tile-tap logging, physical key (§7.4).
+8. **Sound** — the cue table, the I2S tone task, escalation (§9).
 9. **Guided stretch flow.**
-10. **HTTP server** — `/state`, `/event`, `/ws`, mDNS (§8). The board is complete and usable on its own at this point.
+10. **HTTP server** — `/state`, `/event`, `/settings`, `/ws`, `/logs` (§8, §14), mDNS. The board is complete and usable on its own at this point.
 11. **Web app** — the reviewed grid UI, the `Board` client, served from LittleFS.
 12. **Power states** — light sleep, brightness, PMIC events, Dormant.
-13. **Settings screen** — working hours, per-action cadence, sound, haptics, IMU tap.
+13. **Settings screen** — working hours, per-action cadence, sound, volume, IMU tap.
 
 Steps 1–10 are a finished product. Everything after is reach.
 
@@ -1578,16 +1476,15 @@ fixtures/derive/*.json   # the cases
 fixtures/derive/
   interval-done-early.json          re-anchors the next slot from the tap
   fixed-done-early.json             13:00 lunch stays 13:00
-  missed-while-awake.json           unanswered + inside a window = missed
-  missed-while-asleep.json          unanswered + gap = NOT missed
-  awake-gap-boundary.json           119s extends, 121s opens a new window
+  unanswered-past-slot.json         unanswered + in the past = missed, always
   duplicate-event.json              second apply is a no-op
   replay-idempotent.json            applying the same event twice changes nothing
-  stretch-priority.json             stretches take the queue head
+  card-confirm-partial.json         confirming checked rows leaves unchecked ones due
+  stretch-priority.json             a due stretch pre-empts the checklist
   dst-forward.json                  no slots lost or doubled on the changeover
 ```
 
-The last three are the ones worth having. The awake-gap boundary is what separates "you missed this" from "the board was off", idempotence under replay is what makes the web app's retries safe, and DST is the bug that will otherwise appear twice a year and be impossible to reproduce.
+The last three are the ones worth having. Card-confirm-partial is the case that would silently regress if `card_confirm` and `derive` ever disagree about which rows are still open, idempotence under replay is what makes a browser retry or a double-tap on Confirm harmless even without an outbox (§3.5), and DST is the bug that will otherwise appear twice a year and be impossible to reproduce.
 
 ### 11.2 Day rollover
 
@@ -1598,28 +1495,26 @@ Handled in the tick (§5.2), not on boot: the board runs for weeks at a time, so
 ## 12. Known constraints
 
 - **Single point of failure.** The board is the product. If it is off the LAN, the web app is a read-only cache; if it is dead, there is no tracker. Accepted deliberately — the alternative is two schedulers.
-- **Firmware dev loop.** Flash-and-test is slower than a browser reload. §3.3's fixtures and a host-compiled unit test target for `derive` and the slot maths take most of the sting out; build those early.
-- **LAN-only, unauthenticated.** Anyone on the same network can read `/state` and post to `/event`. Fine for a home LAN; not fine on a shared or office network. If that changes, put a shared secret in a header before exposing it further.
-- **No cross-device sync beyond the board.** The board is the only writer of record; two browsers reconcile through it, not with each other.
+- **Firmware dev loop.** Flash-and-test is slower than a browser reload. §11.1's fixtures and a host-compiled unit test target for `derive` and the slot maths take most of the sting out; build those early.
+- **LAN-only, unauthenticated.** Anyone on the same network can read `/state` and post to `/event`. Fine for a home LAN; not fine on a shared or office network. If that changes, put a shared secret in a header before exposing it further. WiFi is required for this to work at all — HTTP and WebSocket both need the browser and the board on the same network, and WiFi is the board's only radio (no Ethernet). It never needs internet access; this is entirely LAN-local, no account, no cloud dependency.
+- **No cross-device sync beyond the board.** The board is the only writer of record; two browsers reach it independently, not each other.
 - **No reach away from the desk.** Deliberate. If you are not at the board, it does not prompt you, and it does not tell your phone.
+- **A board that was off accumulates real misses.** Simplified from an earlier draft that tracked presence explicitly (§3.1) — a board that slept, ran flat, or was unplugged for part of the day will show every slot it missed during that gap as missed when it returns, the same as if it had simply failed to prompt. Accepted for the simplicity; §10 recommends USB-C precisely to keep this rare.
 - **Clock.** NTP at boot when WiFi is available, PCF85063 otherwise. A board that has never seen NTP and has a flat backup cell will have a wrong date, and the day key will be wrong with it. Show the date in the header so this is visible rather than silent.
-
-What is explicitly *not* a constraint, thanks to §3: a board that slept, ran flat, or was unplugged does not accumulate misses. It can be switched off freely without the day's record becoming a wall of hollow rings.
 
 ---
 
 ## 13. What SQLite buys
 
-The schema and the storage code are in §3.5. This section is why, and where the line is.
+The schema and the storage code are in §3.4. This section is why, and where the line is.
 
 ### 13.1 It removes code rather than adding it
 
-The model in §3.1 — an append-only log of uniquely-keyed rows plus a table of intervals — *is* relational. Storing it as packed blobs meant hand-writing the things a database already does. Three examples from earlier drafts of this plan, all now deleted:
+The model in §3.1 — an append-only log of uniquely-keyed rows — *is* relational. Storing it as packed blobs meant hand-writing the things a database already does. Two examples from earlier drafts of this plan, both now deleted:
 
 | Was | Is |
 |---|---|
 | A linear scan over the events array to reject duplicates | `UNIQUE (action, slot)` + `INSERT OR IGNORE` |
-| `EVENTS_MAX` / `AWAKE_MAX` caps and overflow handling | rows |
 | A key-scanning prune of old day blobs | one `DELETE ... WHERE day < date(...)` |
 
 The dedupe case is the one that matters most. It was the load-bearing invariant of the whole design — the thing that makes retries, double-taps and two clients safe — and it was enforced by a loop that a future edit could quietly break. As a constraint, the database refuses the duplicate no matter which code path reached it, including paths nobody has written yet.
@@ -1649,7 +1544,7 @@ The rule: **the database holds facts, `derive` holds meaning.** Anything involvi
 
 ### 13.3 What it unlocks later
 
-Retention is 400 days (§3.5), so the data for history is accumulating from day one even though v1 renders only today. When historical views arrive they are queries, not a migration:
+Retention is 400 days (§3.4), so the data for history is accumulating from day one even though v1 renders only today. When historical views arrive they are queries, not a migration:
 
 ```sql
 -- Water over the last 30 days
@@ -1674,3 +1569,41 @@ GROUP BY action, hour ORDER BY n DESC;
 That last one is the interesting one, and it is the argument for keeping the data: "you skip your 15:30 snack four days in five" is a fact about the schedule being wrong, not about the person. A tracker that can notice that is worth more than one that only counts.
 
 Serve it as `GET /history?from=&to=` when the time comes — a query on the board beats shipping a year of rows to the browser to reduce client-side.
+
+---
+
+## 14. Device logs
+
+There is currently no answer to "why did it crash at 3am" beyond a serial cable plugged into a board that's sitting on someone's desk, which in practice means no answer at all.
+
+**A rolling 24-hour buffer, verbose, written as things happen.** State transitions (Active/Idle/Dormant, power events), WiFi association and drops, watchdog resets, SQLite errors — anything worth an `ESP_LOG` call is worth keeping past the point the serial console scrolled past it.
+
+```c
+// firmware/main/devlog.c
+// A fixed-size ring in LittleFS. Old lines are overwritten, not deleted —
+// there is no unbounded growth to prune, and no SQLite involvement: this is
+// diagnostic scratch, not data the product depends on being correct.
+#define DEVLOG_PATH      "/fs/devlog.txt"
+#define DEVLOG_MAX_BYTES (256 * 1024)          // ~24h of verbose logging, comfortably
+
+void devlog_write(const char *tag, const char *fmt, ...) {
+    va_list ap; va_start(ap, fmt);
+    char line[256];
+    int n = snprintf(line, sizeof(line), "%lld [%s] ", (long long)time(NULL), tag);
+    n += vsnprintf(line + n, sizeof(line) - n, fmt, ap);
+    va_end(ap);
+
+    ring_append(DEVLOG_PATH, DEVLOG_MAX_BYTES, line, n);   // wraps at the size cap
+    ESP_LOGI(tag, "%s", line);                             // still visible over serial
+}
+```
+
+```c
+// GET /logs — pullable from the web app with no cable attached.
+static esp_err_t logs_get(httpd_req_t *req) {
+    httpd_resp_set_type(req, "text/plain");
+    return ring_send(DEVLOG_PATH, req);        // streams the file as-is
+}
+```
+
+Every call site that currently does `ESP_LOGx(...)` on something worth remembering becomes `devlog_write(...)`, which does both — visible on a cable if one happens to be attached at the time, and pullable afterward if it wasn't. The ring is capped and self-overwriting specifically so this can be sprinkled liberally without a slow flash-fill-up turning into its own bug.
