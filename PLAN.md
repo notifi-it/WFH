@@ -788,15 +788,19 @@ static void key_task(void *arg) {
             pressed_at = now;
         } else if (!down && was_down) {                 // edge: release
             int64_t held = now - pressed_at;
-            if (held > DEBOUNCE_US) {
-                if (screen_is_dark()) {
-                    wake_screen();                      // first press only wakes
-                } else if (held > LONG_PRESS_US) {
-                    queue_delay_all(time(NULL));        // hold = delay all 15
-                    feedback_play(CUE_READY);
-                } else if (g_queue_len > 0) {
-                    input_done(g_queue[0]);             // tap = done
-                }
+
+            if (held < DEBOUNCE_US) {
+                /* noise */
+            } else if (held > LONG_PRESS_US) {
+                // Hold = toggle sound. Deliberate by definition, so it acts
+                // straight from a dark screen — no wake-first step. This is
+                // the gesture you reach for *because* something just chimed.
+                input_toggle_sound();
+                wake_screen();                          // show the state briefly
+            } else if (screen_is_dark()) {
+                wake_screen();                          // first tap only wakes
+            } else if (g_queue_len > 0) {
+                input_done(g_queue[0]);                 // tap = done
             }
         }
         was_down = down;
@@ -805,7 +809,37 @@ static void key_task(void *arg) {
 }
 ```
 
-The wake-then-answer split matters: a single press that both lights the panel and logs a completion means every accidental brush marks water as drunk. First press wakes, second press commits. Acting on *release* rather than press is what makes the long-press variant possible without a second button.
+```c
+// firmware/main/input.c
+void input_toggle_sound(void) {
+    g_settings.sound = !g_settings.sound;
+    store_set_setting("sound", g_settings.sound ? "1" : "0");   // survives reboot
+
+    // Order matters. feedback_play() gates audio on g_settings.sound, so
+    // flipping the setting first means the confirmation is automatically
+    // audible when switching ON and silent when switching OFF — no special
+    // case, and never a chirp from a board you just muted.
+    feedback_play(g_settings.sound ? CUE_SOUND_ON : CUE_SOUND_OFF);
+
+    ui_toast(g_settings.sound ? "Sound on" : "Sound off");
+    ws_broadcast_state();                    // the web app's toggle follows
+}
+```
+
+**Why the haptic carries this one.** Every other confirmation on the device can be a sound. This one cannot: the whole point of muting is that you stop hearing things, so the acknowledgement has to arrive through a different channel or the gesture feels like it did nothing. The two patterns are deliberately distinguishable without looking:
+
+| | Haptic | Sound |
+|---|---|---|
+| Sound **on** | two quick pulses `30, 60, 30` | plus an audible chirp — you can hear it again |
+| Sound **off** | one long pulse `160` | none, by definition |
+
+Long and single reads as "closed"; short and double reads as "open". You can tell which state you landed in with the board face-down.
+
+Haptics stay on when sound is off — that is the point of the feature. A muted board still taps you on the desk when a prompt arrives.
+
+**What this costs.** The key previously carried `delay all 15`; sound now owns the hold. Delay-all is touch-only, which is the right trade — muting is the gesture you want blind and in a hurry, and delay-all is one you make while already looking at a card. If you want it back on the key later, a double-tap is free and unambiguous next to a hold.
+
+The wake-then-answer split still applies to the short press: a single tap that both lights the panel and logs a completion means every accidental brush marks water as drunk. First tap wakes, second commits. Acting on *release* rather than press is what lets one button carry both gestures.
 
 Confirm the touch controller part against the schematic for your board revision — the AMOLED boards have changed touch parts between revisions — but the two-button arrangement above is per Waveshare's documentation for this model.
 
@@ -861,7 +895,9 @@ Three endpoints and one socket. Everything is JSON; nothing is versioned beyond 
     "next":    { "water": 1723648800 },
     "due":     ["water"]
   },
-  "power": { "battPct": 82, "charging": true, "onBattery": false },
+  "power":    { "battPct": 82, "charging": true, "onBattery": false },
+  "settings": { "sound": true, "haptics": true },   // so the web toggle follows
+                                                    // a hold on the board, §7.4
   "now": 1723645200                          // board clock, for countdown skew
 }
 ```
@@ -1135,10 +1171,16 @@ Three cues, matching the reviewed prototype's vocabulary. Both channels fire tog
 | Prompt appears | `bloom` — rising two-note | triple pulse |
 | Action logged | `success` — quick up-tick | short tick |
 | Stretch step complete | `ready` — single soft note | light tick |
+| Sound switched **on** | `success` — proof you can hear it | two quick pulses |
+| Sound switched **off** | *(none — that is the point)* | one long pulse |
 
 ```c
 // firmware/main/feedback.h
-typedef enum { CUE_BLOOM, CUE_SUCCESS, CUE_READY, CUE_COUNT } cue_t;
+typedef enum {
+    CUE_BLOOM, CUE_SUCCESS, CUE_READY,
+    CUE_SOUND_ON, CUE_SOUND_OFF,        // hold-to-mute confirmations, §7.4
+    CUE_COUNT
+} cue_t;
 
 void feedback_play(cue_t cue);      // sound + haptic together, non-blocking
 ```
@@ -1157,16 +1199,21 @@ static const tone_t READY[]   = { {440, 120} };                   // A4
 static const uint16_t BUZZ_PROMPT[]  = { 40, 60, 40, 60, 40 };
 static const uint16_t BUZZ_DONE[]    = { 25 };
 static const uint16_t BUZZ_LIGHT[]   = { 12 };
+static const uint16_t BUZZ_ON[]      = { 30, 60, 30 };   // two pulses: "open"
+static const uint16_t BUZZ_OFF[]     = { 160 };          // one long:   "closed"
 
 static const cue_def_t CUES[CUE_COUNT] = {
-    [CUE_BLOOM]   = { BLOOM,   2, BUZZ_PROMPT, 5 },
-    [CUE_SUCCESS] = { SUCCESS, 2, BUZZ_DONE,   1 },
-    [CUE_READY]   = { READY,   1, BUZZ_LIGHT,  1 },
+    [CUE_BLOOM]      = { BLOOM,   2, BUZZ_PROMPT, 5 },
+    [CUE_SUCCESS]    = { SUCCESS, 2, BUZZ_DONE,   1 },
+    [CUE_READY]      = { READY,   1, BUZZ_LIGHT,  1 },
+    [CUE_SOUND_ON]   = { SUCCESS, 2, BUZZ_ON,     3 },
+    [CUE_SOUND_OFF]  = { NULL,    0, BUZZ_OFF,    1 },   // silent by construction
 };
 
 void feedback_play(cue_t cue) {
-    if (g_settings.sound)   audio_play(CUES[cue].tones, CUES[cue].n_tones);
-    if (g_settings.haptics) haptic_play(CUES[cue].buzz, CUES[cue].n_buzz);
+    // Haptics are independent of sound: a muted board still taps the desk.
+    if (g_settings.sound && CUES[cue].n_tones) audio_play(CUES[cue].tones, CUES[cue].n_tones);
+    if (g_settings.haptics)                    haptic_play(CUES[cue].buzz,  CUES[cue].n_buzz);
 }
 ```
 
