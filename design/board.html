@@ -1,0 +1,215 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WFH board — 368×448</title>
+<style>
+  /* ── Exact device geometry ───────────────────────────────────────────
+     368×448 AMOLED. 80px header, 368×368 grid below. Everything here is
+     1:1 with the panel, so what you see is what the board shows.        */
+  :root {
+    --w: 368px;  --h: 448px;  --header: 80px;
+    --bg:     #0d1014;
+    --tile:   #151a21;
+    --text:   #e6edf3;
+    --dim:    #5a636d;
+
+    --stand:  #7fd4a8;
+    --water:  #6ec3e0;
+    --roll:   #b6a3e8;
+    --snack:  #e8b06a;
+    --lunch:  #e8926a;
+    --stretch:#e0d16a;
+    --shut:   #8f9aa8;
+
+    /* One shared feTurbulence tile, defined once, reused by every layer.
+       Critically this is WHITE with varying ALPHA, not grey with varying
+       luminance. Alpha noise composites correctly over a dark background
+       with plain normal blending — which is all the board's software
+       renderer can do. A luminance-noise tile needs a blend mode to read
+       at all, and blend modes are exactly what the device doesn't have. */
+    --grain-svg: url("data:image/svg+xml;utf8,\
+<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'>\
+<filter id='n'>\
+<feTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='4' stitchTiles='stitch'/>\
+<feColorMatrix type='matrix' values='0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  1 0 0 0 -0.58'/>\
+</filter>\
+<rect width='160' height='160' filter='url(%23n)'/></svg>");
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: grid; place-items: center; min-height: 100vh;
+         font: 400 13px/1.2 -apple-system, "SF Pro Text", Inter, system-ui, sans-serif; }
+
+  .panel {
+    width: var(--w); height: var(--h);
+    background: var(--bg);
+    position: relative; overflow: hidden;
+    isolation: isolate;               /* keeps frame grain off the tiles */
+    color: var(--text);
+  }
+
+  /* ── Header ────────────────────────────────────────────────────────── */
+  .header {
+    height: var(--header);
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 14px;
+  }
+  .clock  { font-size: 28px; font-weight: 600; letter-spacing: -0.5px; }
+  .date   { font-size: 12px; color: var(--dim); margin-top: 3px; }
+  .spacer { flex: 1; }
+  .icon   { font-size: 19px; color: var(--text); opacity: .9; }
+  .icon.muted { color: var(--dim); }
+  .batt   { font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+
+  /* ── Grid: 368×368, 2 cols, shutdown spans the last row ────────────── */
+  .grid {
+    height: 368px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-auto-rows: 1fr;
+    gap: 8px; padding: 0 8px 8px;
+  }
+
+  .tile {
+    position: relative; overflow: hidden;
+    border-radius: 12px;
+    background: var(--tile);
+    padding: 9px 10px;
+    display: flex; flex-direction: column;
+    --fill: 0;
+  }
+  .tile--wide { grid-column: 1 / -1; }
+
+  /* The rising wash IS the countdown. scaleY driven by --fill (0→1). */
+  .tile::before {
+    content: ''; position: absolute; inset: 0;
+    background: linear-gradient(to top,
+      color-mix(in oklab, var(--tint) 30%, transparent), transparent 78%);
+    transform: scaleY(var(--fill)); transform-origin: bottom;
+    pointer-events: none;
+  }
+
+  .tile > * { position: relative; z-index: 1; }
+  .name { font-size: 12.5px; font-weight: 500; letter-spacing: -0.1px; }
+  .dots { display: flex; gap: 3px; margin-top: auto; padding-top: 6px; }
+  .dot  { width: 5px; height: 5px; border-radius: 50%; background: #1e242c; }
+  .dot--done    { background: var(--tint); }
+  .dot--skip    { background: #4a525c; }
+  .dot--miss    { background: none; box-shadow: inset 0 0 0 1px #3a424c; }
+  .eta { font-size: 11px; color: var(--dim); font-variant-numeric: tabular-nums;
+         position: absolute; right: 10px; bottom: 9px; }
+
+  /* ── Grain ─────────────────────────────────────────────────────────────
+     Two layers: a stronger one per tile, a fainter one over the whole
+     frame. 6 discrete steps so it reads as film grain, not a sliding
+     sheet. steps(1) is what makes it jump rather than glide.            */
+  @keyframes grain-drift {
+    0%,15%   { transform: translate(0,     0);   }
+    16%,31%  { transform: translate(-2%,   1%);  }
+    32%,47%  { transform: translate(1%,   -2%);  }
+    48%,63%  { transform: translate(-1%,  -1%);  }
+    64%,79%  { transform: translate(2%,    1%);  }
+    80%,100% { transform: translate(0,     2%);  }
+  }
+  .grain {
+    position: absolute; inset: -8%;
+    background-image: var(--grain-svg);
+    pointer-events: none;
+    animation: grain-drift 1.6s steps(1) infinite;
+  }
+  /* Normal blending throughout — the alpha is already in the texture.
+     This is the same compositing the board can do, so what you see here
+     is what the panel shows. */
+  .tile  .grain { opacity: .20; }
+  .panel > .grain { opacity: .10; z-index: 2; }
+
+  @media (prefers-reduced-motion: reduce) { .grain { animation: none; } }
+
+  /* Static-frame mode for screenshots: freeze grain at a chosen step so
+     successive shots are comparable rather than catching random phases. */
+  html[data-freeze] .grain { animation: none; }
+  html[data-freeze="1"] .grain { transform: translate(-2%, 1%); }
+  html[data-freeze="2"] .grain { transform: translate(1%, -2%); }
+  html[data-freeze="3"] .grain { transform: translate(-1%, -1%); }
+
+  /* Toggle to preview what the device can actually do — see notes. */
+  html[data-mode="device"] .grain { opacity: .20; } /* identical — that is the point */
+  html[data-mode="nograin"] .grain { display: none; }
+</style>
+
+<div class="panel">
+  <div class="header">
+    <div>
+      <div class="clock">14:32</div>
+      <div class="date">Thu 14 Aug</div>
+    </div>
+    <div class="spacer"></div>
+    <div class="icon">◉))</div>
+    <div class="batt">82%</div>
+  </div>
+
+  <div class="grid">
+    <div class="tile" style="--tint: var(--stand); --fill: .55">
+      <div class="grain"></div>
+      <div class="name">Stand break</div>
+      <div class="dots">
+        <i class="dot dot--done"></i><i class="dot dot--done"></i><i class="dot dot--done"></i>
+        <i class="dot dot--done"></i><i class="dot dot--skip"></i><i class="dot dot--miss"></i>
+        <i class="dot"></i><i class="dot"></i><i class="dot"></i><i class="dot"></i>
+      </div>
+      <div class="eta">12m</div>
+    </div>
+
+    <div class="tile" style="--tint: var(--water); --fill: .85">
+      <div class="grain"></div>
+      <div class="name">Water</div>
+      <div class="dots">
+        <i class="dot dot--done"></i><i class="dot dot--done"></i><i class="dot dot--done"></i>
+        <i class="dot dot--miss"></i><i class="dot dot--miss"></i>
+        <i class="dot"></i><i class="dot"></i><i class="dot"></i>
+      </div>
+      <div class="eta">4m</div>
+    </div>
+
+    <div class="tile" style="--tint: var(--roll); --fill: .2">
+      <div class="grain"></div>
+      <div class="name">Shoulder roll</div>
+      <div class="dots">
+        <i class="dot dot--done"></i><i class="dot dot--done"></i><i class="dot dot--skip"></i>
+        <i class="dot"></i><i class="dot"></i><i class="dot"></i><i class="dot"></i><i class="dot"></i>
+      </div>
+      <div class="eta">41m</div>
+    </div>
+
+    <div class="tile" style="--tint: var(--snack); --fill: .05">
+      <div class="grain"></div>
+      <div class="name">Snack</div>
+      <div class="dots">
+        <i class="dot dot--done"></i><i class="dot"></i>
+      </div>
+      <div class="eta">58m</div>
+    </div>
+
+    <div class="tile" style="--tint: var(--lunch); --fill: 0">
+      <div class="grain"></div>
+      <div class="name">Lunch</div>
+      <div class="dots"><i class="dot dot--done"></i></div>
+      <div class="eta">—</div>
+    </div>
+
+    <div class="tile" style="--tint: var(--stretch); --fill: .38">
+      <div class="grain"></div>
+      <div class="name">Stretches</div>
+      <div class="dots"><i class="dot dot--done"></i><i class="dot"></i></div>
+      <div class="eta">2h</div>
+    </div>
+
+    <div class="tile tile--wide" style="--tint: var(--shut); --fill: 0">
+      <div class="grain"></div>
+      <div class="name">Shut down</div>
+      <div class="dots"><i class="dot"></i></div>
+      <div class="eta">3h 28m</div>
+    </div>
+  </div>
+
+  <div class="grain"></div>
+</div>
