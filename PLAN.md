@@ -625,7 +625,20 @@ void queue_dismiss(void) {
 
 ## 7. Board UI
 
-368x448 AMOLED, LVGL. A 368x368 square carries the grid; the remaining 80px is a header with the clock, the date and a battery pip.
+368x448 AMOLED, LVGL. A 368x368 square carries the grid; the remaining 80px is a header with the clock, the date, a battery pip and the sound icon.
+
+```
+┌──────────────────────────────────────────┐
+│  14:32   Thu 14 Aug            🔊    ▮82% │  ← 80px header
+├──────────────────────────────────────────┤
+│  ┌────────────┐  ┌────────────┐          │
+│  │ Stand      │  │ Water      │          │
+│  │ ●●●●○○○○○○ │  │ ●●●◌○○○○   │          │
+│  │       12m  │  │        4m  │          │  ← 368×368 grid
+│  └────────────┘  └────────────┘          │
+│         … five more …                    │
+└──────────────────────────────────────────┘
+```
 
 ### 7.1 Grid (default)
 
@@ -821,8 +834,8 @@ void input_toggle_sound(void) {
     // case, and never a chirp from a board you just muted.
     feedback_play(g_settings.sound ? CUE_SOUND_ON : CUE_SOUND_OFF);
 
-    ui_toast(g_settings.sound ? "Sound on" : "Sound off");
-    ws_broadcast_state();                    // the web app's toggle follows
+    ui_sound_icon_update();                  // the icon is the state, §7.5
+    ws_broadcast_state();                    // the web app's icon follows
 }
 ```
 
@@ -857,7 +870,53 @@ static void imu_tap_isr(void *arg) {
 
 Prototype it behind the setting and keep the guard: an IMU tap can only answer, never originate.
 
-### 7.5 Stretch flow
+### 7.5 The sound icon
+
+The icon *is* the state. It sits in the header, always visible, and it is also the third way to toggle — tap it. There is no toast and no settings dive: you can see whether the board will make a noise without touching anything.
+
+```c
+// firmware/main/ui_header.c
+static lv_obj_t *g_sound_icon;
+
+void ui_header_build(lv_obj_t *parent) {
+    g_sound_icon = lv_label_create(parent);
+    lv_obj_set_style_text_font(g_sound_icon, &lv_font_montserrat_24, 0);
+    lv_obj_align(g_sound_icon, LV_ALIGN_RIGHT_MID, -70, 0);
+
+    // Generous hit area: the glyph is 24px, the target is 56px square.
+    lv_obj_add_flag(g_sound_icon, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(g_sound_icon, 16);
+    lv_obj_add_event_cb(g_sound_icon, on_sound_icon_cb, LV_EVENT_CLICKED, NULL);
+
+    ui_sound_icon_update();
+}
+
+void ui_sound_icon_update(void) {
+    lv_label_set_text(g_sound_icon,
+        g_settings.sound ? LV_SYMBOL_VOLUME_MAX : LV_SYMBOL_MUTE);
+
+    // Muted is dimmed as well as different: the shape carries the meaning at
+    // a glance, the weight confirms it. Colour alone would not survive the
+    // amber and yellow tints washing the tiles underneath.
+    lv_obj_set_style_text_color(g_sound_icon,
+        lv_color_hex(g_settings.sound ? 0xE6EDF3 : 0x5A636D), 0);
+
+    pulse(g_sound_icon);        // brief scale bump, so a change catches the eye
+}
+
+static void on_sound_icon_cb(lv_event_t *e) {
+    if (screen_is_dark()) { wake_screen(); return; }
+    input_toggle_sound();       // same function the key hold calls, §7.4
+}
+```
+
+Three ways in, one function out — the key hold (§7.4), this tap, and `POST /settings` from the web app (§8.2) all call `input_toggle_sound`, exactly as the four completion paths all call `input_done`.
+
+The pulse is what replaces the toast. A hold on the key can happen while you are looking at the panel or not, so the icon animates on change rather than sitting there statically — enough to catch the eye if you are watching, invisible if you are not, and no text to read either way.
+
+**Icon, not switch.** A toggle switch would need a label to say what it toggles and would take three times the header width. A speaker glyph reads instantly at 24px and is the same idiom every phone uses.
+
+### 7.6 Stretch flow
 
 Replaces the prompt screen. One stretch per screen with a countdown ring, auto-advancing on completion, Next to advance early, Skip to abandon the set.
 
@@ -879,6 +938,7 @@ Three endpoints and one socket. Everything is JSON; nothing is versioned beyond 
 |---|---|---|
 | `GET /state` | → `{ log, view, power }` | full snapshot, used once on load |
 | `POST /event` | `{ action, kind, ts, slot }` → `{ ok, applied }` | log a completion |
+| `POST /settings` | `{ sound?, haptics? }` → `{ ok }` | flip a toggle from the browser |
 | `GET /ws` | ← `{ type: 'state', … }` | push on every change |
 | `GET /` | → the web app itself | static files from LittleFS |
 
@@ -947,6 +1007,27 @@ static esp_err_t event_post(httpd_req_t *req) {
 **The WebSocket.** ESP-IDF's `esp_http_server` handles the upgrade; we keep a small table of connected sockets and write the snapshot to each on change.
 
 ```c
+// ── POST /settings ───────────────────────────────────────────────────────
+// The web app's sound icon is a remote for the board's. Partial updates:
+// only the keys present are changed.
+static esp_err_t settings_post(httpd_req_t *req) {
+    char buf[128];
+    int n = httpd_req_recv(req, buf, MIN(req->content_len, sizeof(buf) - 1));
+    if (n <= 0) return ESP_FAIL;
+    buf[n] = '\0';
+
+    cJSON *root = cJSON_Parse(buf);
+    cJSON *sound = cJSON_GetObjectItem(root, "sound");
+
+    if (cJSON_IsBool(sound) && cJSON_IsTrue(sound) != g_settings.sound) {
+        input_toggle_sound();     // same path as the key hold and the icon tap:
+                                  // persists, buzzes, updates the icon, rebroadcasts
+    }
+    /* … haptics … */
+    cJSON_Delete(root);
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
 // ── GET /ws ──────────────────────────────────────────────────────────────
 #define WS_MAX_CLIENTS 4
 static int g_ws_fds[WS_MAX_CLIENTS];
@@ -1003,12 +1084,13 @@ void api_start(void) {
     ESP_ERROR_CHECK(httpd_start(&g_server, &cfg));
 
     httpd_uri_t routes[] = {
-        { .uri = "/state", .method = HTTP_GET,  .handler = state_get  },
-        { .uri = "/event", .method = HTTP_POST, .handler = event_post },
-        { .uri = "/ws",    .method = HTTP_GET,  .handler = ws_handler, .is_websocket = true },
-        { .uri = "/*",     .method = HTTP_GET,  .handler = static_get  },  // the web app
+        { .uri = "/state",    .method = HTTP_GET,  .handler = state_get    },
+        { .uri = "/event",    .method = HTTP_POST, .handler = event_post   },
+        { .uri = "/settings", .method = HTTP_POST, .handler = settings_post },
+        { .uri = "/ws",       .method = HTTP_GET,  .handler = ws_handler, .is_websocket = true },
+        { .uri = "/*",        .method = HTTP_GET,  .handler = static_get   },  // the web app
     };
-    for (int i = 0; i < 4; i++) httpd_register_uri_handler(g_server, &routes[i]);
+    for (int i = 0; i < 5; i++) httpd_register_uri_handler(g_server, &routes[i]);
 
     ESP_ERROR_CHECK(mdns_init());
     ESP_ERROR_CHECK(mdns_hostname_set("wfh"));            // → wfh.local
@@ -1101,6 +1183,20 @@ export class Board {
     }
   }
 
+  /** Flip the board's sound from the browser. The board is authoritative:
+   *  we send the intent and let the push tell us what actually happened,
+   *  so the icon can never show a state the board is not in. */
+  async setSound(on: boolean) {
+    await fetch(`http://${this.host}/settings`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sound: on }),
+    });
+    // No optimistic update here — unlike a tap, there is nothing to feel
+    // impatient about, and a toggle that flickers back is worse than one
+    // that waits 20ms.
+  }
+
   /** The board's clock, not the browser's. Countdowns must agree with the tile. */
   boardNow(): number { return Math.floor(Date.now() / 1000) + this.skew; }
 }
@@ -1156,6 +1252,16 @@ Asleep, off the LAN, or flat — all indistinguishable from a closed socket, and
 
 ```tsx
 {!board.online && <div className="banner">Board offline — taps will sync when it returns</div>}
+```
+
+The header carries the same sound icon as the board (§7.5), driven by the same state and reaching the same function:
+
+```tsx
+<button className="icon-btn" onClick={() => board.setSound(!s.settings.sound)}
+        aria-label={s.settings.sound ? 'Mute board' : 'Unmute board'}
+        aria-pressed={s.settings.sound} disabled={!board.online}>
+  <Icon name={s.settings.sound ? 'volume-up' : 'volume-off'} />
+</button>
 ```
 
 **The web app does not prompt in this state.** No sound, no cards, no timers. Filling the gap with browser-side prompting would resurrect exactly the two-scheduler problem §1 exists to avoid, and would do it at the worst possible moment: when the board comes back and both start chiming.
