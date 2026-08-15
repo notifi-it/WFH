@@ -1,0 +1,41 @@
+{
+  "workStart": "09:00",
+  "workEnd": "18:00",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "graceMin": 30,
+  "actions": [
+    { "id": "stand", "name": "Stand break", "blurb": "Up on your feet for a minute.",
+      "icon": "person-check", "tint": "#7fd4a8", "target": 10, "flow": "tap", "priority": 1,
+      "cadence": { "kind": "interval", "everyMin": 40 } },
+
+    { "id": "water", "name": "Water", "blurb": "Glass of water. Refill while you are up.",
+      "icon": "drop", "tint": "#6ec3e0", "target": 8, "flow": "tap", "priority": 1,
+      "cadence": { "kind": "interval", "everyMin": 45 } },
+
+    { "id": "roll", "name": "Shoulder roll", "blurb": "Ten slow rolls back, then drop the shoulders.",
+      "icon": "refresh", "tint": "#b6a3e8", "target": 8, "flow": "tap", "priority": 1,
+      "cadence": { "kind": "interval", "everyMin": 60 } },
+
+    { "id": "snack", "name": "Snack", "blurb": "Something small before the slump.",
+      "icon": "apple", "tint": "#e8b06a", "target": 2, "flow": "tap", "priority": 2,
+      "cadence": { "kind": "fixed", "times": ["10:45", "15:30"] } },
+
+    { "id": "lunch", "name": "Lunch", "blurb": "Away from the desk.",
+      "icon": "bowl", "tint": "#e8926a", "target": 1, "flow": "tap", "priority": 2,
+      "cadence": { "kind": "fixed", "times": ["13:00"] } },
+
+    { "id": "stretch", "name": "Stretches", "blurb": "Four stretches, about three minutes.",
+      "icon": "sun", "tint": "#e0d16a", "target": 2, "flow": "stretch", "priority": 3,
+      "cadence": { "kind": "fixed", "times": ["11:30", "16:30"] } },
+
+    { "id": "shutdown", "name": "Shut down", "blurb": "Close the laptop. That is the day.",
+      "icon": "moon", "tint": "#8f9aa8", "target": 1, "flow": "tap", "priority": 2,
+      "cadence": { "kind": "fixed", "times": ["18:00"] } }
+  ],
+  "stretches": [
+    { "name": "Chin tucks",          "seconds": 30, "cue": "Draw the chin straight back. Hold, release, repeat." },
+    { "name": "Doorway pec stretch", "seconds": 40, "cue": "Forearms on the frame, step through, chest open." },
+    { "name": "Cat-cow",             "seconds": 40, "cue": "On all fours, arch and round with the breath." },
+    { "name": "Hip flexor stretch",  "seconds": 50, "cue": "Half kneel, tuck the pelvis, 25s each side." }
+  ]
+}

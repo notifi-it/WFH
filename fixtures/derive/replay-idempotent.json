@@ -1,0 +1,24 @@
+{
+  "name": "replay-idempotent",
+  "why": "The property behind every retry in the system: applying the whole log twice must produce the identical view. Run in replay mode, so the harness also derives over a doubled log and compares. Uses the real shipping schedule rather than a toy one.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-08-13",
+  "now": "13:10",
+  "mode": "replay",
+  "events": [
+    { "action": "stand", "kind": "done", "ts": "09:45", "slot": "09:40" },
+    { "action": "water", "kind": "skip", "ts": "10:35", "slot": "10:30" },
+    { "action": "lunch", "kind": "done", "ts": "13:05", "slot": "13:00" }
+  ],
+  "expect": {
+    "counts":  { "stand": 1, "lunch": 1 },
+    "skipped": { "water": 1 },
+    "missed":  { "stand": 4, "water": 3, "roll": 3 },
+    "next": {
+      "stand": "13:45", "water": "13:30", "roll": "14:00",
+      "snack": "15:30", "stretch": "16:30", "shutdown": "18:00"
+    },
+    "nextNone": ["lunch"],
+    "due": ["stretch", "snack", "stand", "water", "roll"]
+  }
+}

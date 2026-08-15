@@ -1,0 +1,16 @@
+{
+  "name": "stretch-priority",
+  "why": "§6: a due stretch pre-empts the checklist, so it must sort first. At 11:35 five things are due on the real schedule; due[0] must be the stretch, and equal priorities must keep config order rather than shuffling between ticks.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-08-13",
+  "now": "11:35",
+  "events": [],
+  "expect": {
+    "missed": { "stand": 2, "water": 2, "roll": 1 },
+    "next": {
+      "stand": "11:40", "water": "12:00", "roll": "12:00", "snack": "15:30",
+      "lunch": "13:00", "stretch": "16:30", "shutdown": "18:00"
+    },
+    "due": ["stretch", "snack", "stand", "water", "roll"]
+  }
+}

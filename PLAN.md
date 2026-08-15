@@ -233,6 +233,8 @@ The subtlety is `anchor`. §5.3's rule — an interval action done early resets 
 
 `isDueNow` is §3.1's rule made precise: *unanswered and in the past* splits into *due* (window still open) and *missed* (window closed). Without the split, a prompt would count as a miss the second it fired — the hollow ring appearing while the card is still asking — and §9's "goes quiet when the next slot arrives" would contradict the dots. The window needs no storage; it falls out of the same slot walk.
 
+**Open question, surfaced by the fixtures.** Deriving the window from the *next slot* is right for the interval actions — a stand prompt gives up after 40 minutes — but the fixed ones have enormous gaps, so an unanswered 10:45 snack stays on the card until 15:30, and an unanswered 11:30 stretch until 16:30. `stretch-priority.json` (§11.1) asserts exactly that today, which is how it was noticed. Two ways to go: accept it (the card is the outstanding list, and a snack you never ate *is* outstanding), or cap the window at some minutes-open constant. The cap is a tunable, and this plan has spent two revisions deleting tunables (§3.1), so the default stands — but it stands as a decision, not an oversight. Change the fixture with it if it changes.
+
 ### 3.3 `derive` runs once, on the board
 
 Two earlier drafts got this wrong in opposite directions: one implemented `derive` twice (C for the board, TypeScript for a browser client) with shared fixtures to keep them honest; the next kept one implementation but shipped its output to that client.
@@ -1169,7 +1171,7 @@ Firmware first, because it is the product and it is the long pole. Each step sho
 1. **Board bring-up** — ESP-IDF project, display, touch, LVGL hello-world, WiFi, NTP-set RTC. Confirms the hardware and the toolchain before any product logic exists. First act: read the revision label (§1) and run the vendor demo that matches it — V1 and V2 take different display and touch drivers.
 2. **Config generation** — `actions.json` → `actions.g.h`, wired into the build with the CI diff check.
 3. **Storage** — LittleFS partition, SQLite, schema, `store_add_event` / `store_load_day`. Verifiable on its own with a serial console before any UI exists.
-4. **`derive` and `day_apply_event`** — the walk, the anchor rule, plus the fixtures in §11.1. **This is the step to get right**; everything else is presentation.
+4. **`derive`** ✅ — the walk, the anchor rule, the due window, and the §11.1 fixtures, all host-built and mutation-checked. `day_apply_event` still to come, on top of step 3. **This was the step to get right**; everything else is presentation.
 5. **Scheduler tick and the checklist card** (§6) — due detection, `card_sync`, Confirm/Skip/Delay-all/X. Testable on-desk by moving the RTC forward.
 6. **Grid UI** — tiles, dots, wash, header, the shared X component (§7.3a). First point at which the thing looks like itself.
 7. **Inputs** — card rows, tile-tap logging, physical key (§7.4).
@@ -1193,16 +1195,22 @@ fixtures/derive/*.json   # the cases
 ```
 fixtures/derive/
   interval-done-early.json          re-anchors the next slot from the tap
-  fixed-done-early.json             13:00 lunch stays 13:00
-  unanswered-past-slot.json         unanswered + in the past = missed, always
-  duplicate-event.json              second apply is a no-op
-  replay-idempotent.json            applying the same event twice changes nothing
+  fixed-done-early.json             13:00 lunch stays 13:00, and does not loop
+  unanswered-past-slot.json         window open = due, window closed = missed
+  snoozed-not-due.json              snoozed inside the window is neither
+  duplicate-event.json              a twice-logged answer still counts once
+  replay-idempotent.json            the doubled log derives identically
   card-confirm-partial.json         confirming checked rows leaves unchecked ones due
   stretch-priority.json             a due stretch pre-empts the checklist
-  dst-forward.json                  no slots lost or doubled on the changeover
+  dst-forward.json                  BST day: slots hold their wall-clock time
+  dst-day-before.json               the GMT control for the pair
 ```
 
-The last three are the ones worth having. Card-confirm-partial is the case that would silently regress if `card_confirm` and `derive` ever disagree about which rows are still open, idempotence under replay is what makes a double-tap on Confirm harmless, and DST is the bug that will otherwise appear twice a year and be impossible to reproduce.
+Card-confirm-partial is the case that would silently regress if `card_confirm` and `derive` ever disagree about which rows are still open, idempotence under replay is what makes a double-tap on Confirm harmless, and DST is the bug that will otherwise appear twice a year and be impossible to reproduce.
+
+The DST pair only works because its expected epochs are hand-computed constants rather than recorded output — lunch is 82,800s apart across the changeover, not 86,400s, and an implementation doing UTC arithmetic by hand passes one fixture and fails the other. `fixtures/derive/README.md` states that rule and the assertion semantics.
+
+**A suite that passes on its first run has not been shown to work.** These were verified by mutation — the anchor rule dropped, the due window removed, `tm_isdst` forced to 0, the sort made unstable, snooze ignored — and each one is caught. Re-run that check after any change to the walk; the table in the fixtures README lists the mutations.
 
 ### 11.2 Day rollover
 

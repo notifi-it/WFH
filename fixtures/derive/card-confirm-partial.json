@@ -1,0 +1,25 @@
+{
+  "name": "card-confirm-partial",
+  "why": "§6: Confirm logs the checked rows and leaves the rest due. Three actions were due at 11:05; stand and roll were ticked and confirmed, water was not. Water stays due (not skipped, not missed), and the two confirmed ones re-anchor off the 11:05 tap.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-08-13",
+  "now": "11:05",
+  "actions": [
+    { "id": "stand", "name": "Stand break", "target": 10, "priority": 1, "flow": "tap",
+      "cadence": { "kind": "interval", "everyMin": 40 } },
+    { "id": "water", "name": "Water", "target": 8, "priority": 1, "flow": "tap",
+      "cadence": { "kind": "interval", "everyMin": 45 } },
+    { "id": "roll", "name": "Shoulder roll", "target": 8, "priority": 1, "flow": "tap",
+      "cadence": { "kind": "interval", "everyMin": 60 } }
+  ],
+  "events": [
+    { "action": "stand", "kind": "done", "ts": "11:05", "slot": "11:00" },
+    { "action": "roll",  "kind": "done", "ts": "11:05", "slot": "11:00" }
+  ],
+  "expect": {
+    "counts": { "stand": 1, "roll": 1 },
+    "missed": { "stand": 2, "water": 1, "roll": 1 },
+    "next": { "stand": "11:45", "water": "11:15", "roll": "12:05" },
+    "due": ["water"]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "name": "interval-done-early",
+  "why": "§5.3: an interval action done early re-anchors from the tap. Water's grid slot was 09:45 and the next would have been 10:30; drinking at 09:50 pushes it to 10:35.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-08-13",
+  "now": "09:50",
+  "actions": [
+    { "id": "water", "name": "Water", "target": 8, "priority": 1, "flow": "tap",
+      "cadence": { "kind": "interval", "everyMin": 45 } }
+  ],
+  "events": [
+    { "action": "water", "kind": "done", "ts": "09:50", "slot": "09:45" }
+  ],
+  "expect": {
+    "counts": { "water": 1 },
+    "next": { "water": "10:35" },
+    "due": []
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "name": "dst-day-before",
+  "why": "The control for dst-forward: the same wall-clock schedule one day earlier, still in GMT. Lunch is 1774702800 here and 1774785600 the next day — exactly 82800s (23h) apart, not 86400s. A UTC-by-hand implementation passes one of these two fixtures and fails the other.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-03-28",
+  "now": "09:30",
+  "events": [],
+  "expect": {
+    "next": { "stand": "09:40", "water": "09:45", "roll": "10:00", "lunch": "13:00" },
+    "nextEpoch": { "stand": 1774690800, "lunch": 1774702800 },
+    "due": []
+  }
+}
