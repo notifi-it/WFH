@@ -25,3 +25,10 @@ CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 CONFIG_LV_USE_PERF_MONITOR=y
+
+# The QSPI panel is fed by DMA, and the framebuffer is cache-backed. Waveshare
+# set this in every one of their examples and the S1 spike inherited it; the
+# app project did not, and the screen rendered as smeared vertical bars — the
+# washes stretched across the panel — while every log line still said the
+# display was up. Framebuffer corruption reports nothing.
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
