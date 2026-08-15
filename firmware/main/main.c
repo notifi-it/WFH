@@ -1,114 +1,139 @@
-// Spike S2 (§15.3): does SQLite on LittleFS hold up at a full retention
-// window? R1 is the one risk that could force a design change, so it gets
-// measured on real hardware before the build order commits to §3.4.
-//
-// Pass: p99 insert < 50ms with synchronous=FULL at 15,000 rows.
+// WFH health tracker. Boot, then a 1 Hz tick that asks derive what is due
+// and hands it to the card (§5.2). Nothing here writes the log — that is
+// day_apply_event's job, reached only through input_done / input_skip.
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#include <sys/time.h>
 
-#include "esp_timer.h"
+#include "bsp/esp-bsp.h"
+#include "esp_io_expander.h"
+#include "esp_check.h"
+#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "lvgl.h"
 
+#include "audio.h"
+#include "card.h"
 #include "config.h"
+#include "day.h"
 #include "derive.h"
+#include "feedback.h"
+#include "input.h"
 #include "store.h"
+#include "ui.h"
 
-#define TOTAL_EVENTS    15000
-#define EVENTS_PER_DAY     30     // §3.4's own estimate
+static const char *TAG = "wfh";
 
-static int cmp_u32(const void *a, const void *b) {
-    const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b;
-    return (x > y) - (x < y);
+#define ESCALATE_AFTER_S 120        // §9: re-cue once, louder, then stay quiet
+
+/** The V1 BSP creates the I/O expander and never drives it, so the panel has
+ *  no VCI and both controllers sit in reset. Nothing reports this — every SPI
+ *  write into an unpowered panel returns ESP_OK. See §15.3.
+ *    EXIO0 = LCD_RESET, EXIO1 = DSI_PWR_EN, EXIO2 = TP_RESET */
+static esp_err_t panel_power_up(void) {
+    esp_io_expander_handle_t exp = bsp_io_expander_init();
+    if (!exp) return ESP_FAIL;
+
+    const uint32_t pins = IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_2;
+    ESP_RETURN_ON_ERROR(esp_io_expander_set_dir(exp, pins, IO_EXPANDER_OUTPUT), TAG, "expander dir");
+
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_1, 1);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_2, 0);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_2, 1);
+    vTaskDelay(pdMS_TO_TICKS(120));
+    return ESP_OK;
 }
 
-static void report(const char *label, uint32_t *us, int n) {
-    qsort(us, n, sizeof *us, cmp_u32);
-    uint64_t sum = 0;
-    for (int i = 0; i < n; i++) sum += us[i];
-    printf("  %-12s n=%5d  mean %6.1fms  p50 %6.1fms  p99 %6.1fms  max %7.1fms\n",
-           label, n, (double)sum / n / 1000.0, us[n / 2] / 1000.0,
-           us[(int)(n * 0.99)] / 1000.0, us[n - 1] / 1000.0);
+/** No NTP yet (§11 step 10). Until then a board with a cold RTC would write
+ *  events under a 1970 day key, so seed it from the build clock and say so
+ *  loudly — a wrong date is the one failure here that corrupts data (§12). */
+static void clock_bootstrap(void) {
+    setenv("TZ", g_settings.tz, 1);
+    tzset();
+
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+
+    if (tm.tm_year < 124) {                     // before 2024 => never set
+        struct tm built = { 0 };
+        strptime(__DATE__ " " __TIME__, "%b %d %Y %H:%M:%S", &built);
+        built.tm_isdst = -1;
+        const struct timeval tv = { .tv_sec = mktime(&built) };
+        settimeofday(&tv, NULL);
+        ESP_LOGW(TAG, "RTC was unset — seeded from build time. Dates are approximate until NTP.");
+    }
+
+    now = time(NULL);
+    localtime_r(&now, &tm);
+    char buf[40];
+    strftime(buf, sizeof buf, "%Y-%m-%d %H:%M:%S %Z", &tm);
+    ESP_LOGI(TAG, "clock: %s", buf);
+}
+
+static void tick_task(void *arg) {
+    LV_UNUSED(arg);
+    char day_key[11] = { 0 };
+
+    for (;;) {
+        const time_t now = time(NULL);
+
+        // Rollover is handled here rather than on boot: the board runs for
+        // weeks, so midnight is the common case, not an edge case (§11.2).
+        const char *today = store_day_key(now);
+        if (strcmp(today, day_key) != 0) {
+            strncpy(day_key, today, sizeof day_key - 1);
+            day_reload(now);
+            ESP_LOGI(TAG, "day is now %s", day_key);
+        } else {
+            wfh_derive(&g_day, now, &g_settings, &g_view);
+        }
+
+        if (bsp_display_lock(50)) {
+            const int was = g_card.len;
+            card_sync(&g_card, g_view.due, g_view.n_due, &g_settings, now, ui_card_host());
+
+            if (g_card.len > 0 && was == 0) feedback_play(CUE_BLOOM);
+
+            // §9: escalate once rather than nagging in a loop.
+            if (g_card.len > 0 && !g_card.escalated && now - g_card.raised_at >= ESCALATE_AFTER_S) {
+                g_card.escalated = true;
+                feedback_play(CUE_BLOOM);
+            }
+
+            ui_refresh();
+            bsp_display_unlock();
+        }
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }
 
 void app_main(void) {
-    printf("\n=== S2: storage under load ===\n");
+    printf("\n=== WFH tracker ===\n");
 
-    if (store_open() != ESP_OK) { printf("store_open failed\n"); return; }
-    // Evidence for the stack sizing, not decoration: mounting LittleFS is the
-    // deepest thing this firmware does, and getting it wrong crashes inside
-    // the flash driver where nothing points back here.
-    printf("stack headroom after mount: %u bytes\n",
-           (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    printf("journal_mode = %s   (WAL needs EXCLUSIVE locking on this VFS)\n", store_journal_mode());
-    printf("starting row count: %d\n\n", store_count_events());
+    ESP_ERROR_CHECK(bsp_i2c_init());
+    ESP_ERROR_CHECK(panel_power_up());
 
-    const settings_t *s = config_default();
-    uint32_t *lat = malloc(TOTAL_EVENTS * sizeof(uint32_t));
-    if (!lat) { printf("no memory for timings\n"); return; }
+    lv_display_t *disp = bsp_display_start();
+    if (!disp) { ESP_LOGE(TAG, "display start failed"); return; }
+    ESP_ERROR_CHECK(bsp_display_brightness_set(85));
 
-    // Walk backwards from today so `day` spans a realistic retention window
-    // rather than piling every row into one key.
-    const time_t base = time(NULL) - (time_t)(TOTAL_EVENTS / EVENTS_PER_DAY) * 86400;
+    g_settings = *config_default();
+    clock_bootstrap();
 
-    printf("inserting %d events...\n", TOTAL_EVENTS);
-    const int64_t run_start = esp_timer_get_time();
+    ESP_ERROR_CHECK(store_open());
+    day_reload(time(NULL));
 
-    for (int i = 0; i < TOTAL_EVENTS; i++) {
-        // Heartbeat: without it, "very slow" and "hung" look identical on
-        // the wire, and telling those apart is the whole point of R1.
-        if (i % 25 == 0) {
-            printf("  [%5d] %.1fs elapsed\n", i, (esp_timer_get_time() - run_start) / 1e6);
-            fflush(stdout);
-        }
-        log_event_t ev = {
-            .action = i % s->n_actions,
-            .kind   = (i % 9 == 0) ? KIND_SKIP : KIND_DONE,
-            .ts     = base + (time_t)(i / EVENTS_PER_DAY) * 86400 + (i % EVENTS_PER_DAY) * 900,
-            .slot   = base + (time_t)(i / EVENTS_PER_DAY) * 86400 + (i % EVENTS_PER_DAY) * 900,
-        };
+    if (bsp_display_lock(0)) { ui_build(); bsp_display_unlock(); }
 
-        const int64_t t0 = esp_timer_get_time();
-        store_add_event(&ev, s);
-        lat[i] = (uint32_t)(esp_timer_get_time() - t0);
+    if (audio_init(70) != ESP_OK) ESP_LOGE(TAG, "audio init failed — running silent");
 
-        if ((i + 1) % 100 == 0) vTaskDelay(1);      // let idle run; no WDT trip
+    ESP_LOGI(TAG, "%d actions, %d events today, %d due now",
+             g_settings.n_actions, g_day.events_len, g_view.n_due);
 
-        if ((i + 1) % 1000 == 0) {
-            static uint32_t window[1000];           // static: 4KB is too much stack
-            memcpy(window, &lat[i - 999], sizeof window);
-            char label[16];
-            snprintf(label, sizeof label, "@%dk rows", (i + 1) / 1000);
-            report(label, window, 1000);
-            vTaskDelay(1);                     // let the idle task run; no WDT trips
-        }
-    }
-
-    printf("\n  --- whole run ---\n");
-    report("all inserts", lat, TOTAL_EVENTS);
-
-    // The two other things storage does on the hot path.
-    day_log_t day;
-    const time_t mid = base + (time_t)(TOTAL_EVENTS / EVENTS_PER_DAY / 2) * 86400;
-    int64_t t0 = esp_timer_get_time();
-    store_load_day(store_day_key(mid), &day, s);
-    printf("\n  load_day     %d events in %.1fms\n", day.events_len,
-           (esp_timer_get_time() - t0) / 1000.0);
-
-    day_view_t v;
-    t0 = esp_timer_get_time();
-    wfh_derive(&day, mid + 43200, s, &v);
-    printf("  derive       %.2fms  (runs every tick)\n", (esp_timer_get_time() - t0) / 1000.0);
-
-    t0 = esp_timer_get_time();
-    store_prune(400);
-    printf("  prune 400d   %.1fms\n", (esp_timer_get_time() - t0) / 1000.0);
-
-    printf("\n  rows now: %d\n", store_count_events());
-    store_close();
-    printf("\n=== done ===\n");
-
-    free(lat);
-    for (;;) vTaskDelay(pdMS_TO_TICKS(10000));
+    xTaskCreate(tick_task, "tick", 6144, NULL, 5, NULL);
 }

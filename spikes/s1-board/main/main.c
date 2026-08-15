@@ -10,6 +10,7 @@
 #include "driver/i2c_master.h"
 #include "esp_io_expander.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
@@ -23,16 +24,32 @@ static const char *TAG = "s1";
 static lv_obj_t *g_readout;
 static int       g_taps;
 
-typedef struct { const char *name; uint32_t tint; const char *dots; } tile_t;
+// Real cadences from config/actions.json. The spike runs a compressed clock
+// so a 40-minute fill is watchable; the *update rate* stays 1 Hz, exactly
+// what §5.2's tick does, so the frame cost measured here is the real one.
+#define TIME_SPEEDUP 60
 
-static const tile_t TILES[] = {
-    { "Stand break",   0x7fd4a8, "4 of 10" },
-    { "Water",         0x6ec3e0, "3 of 8"  },
-    { "Shoulder roll", 0xb6a3e8, "2 of 8"  },
-    { "Snack",         0xe8b06a, "1 of 2"  },
-    { "Lunch",         0xe8926a, "0 of 1"  },
-    { "Stretches",     0xe0d16a, "1 of 2"  },
+typedef struct {
+    const char *name;
+    uint32_t    tint;
+    int         every_min;
+    const char *dots;
+    lv_obj_t   *tile;
+    lv_obj_t   *wash;
+    lv_obj_t   *countdown;
+} tile_t;
+
+static tile_t TILES[] = {
+    { "Stand break",   0x7fd4a8, 40, "4 of 10" },
+    { "Water",         0x6ec3e0, 45, "3 of 8"  },
+    { "Shoulder roll", 0xb6a3e8, 60, "2 of 8"  },
+    { "Snack",         0xe8b06a, 25, "1 of 2"  },
+    { "Lunch",         0xe8926a, 90, "0 of 1"  },
+    { "Stretches",     0xe0d16a, 55, "1 of 2"  },
 };
+
+#define TILE_W 172
+#define TILE_H 104
 
 static void on_tile(lv_event_t *e) {
     const tile_t *t = lv_event_get_user_data(e);
@@ -82,30 +99,92 @@ static void build_screen(void) {
     // 2-column grid in the 368x368 square below the header.
     for (int i = 0; i < (int)(sizeof TILES / sizeof TILES[0]); i++) {
         lv_obj_t *tile = lv_obj_create(scr);
-        lv_obj_set_size(tile, 172, 104);
+        lv_obj_set_size(tile, TILE_W, TILE_H);
         lv_obj_set_pos(tile, (i % 2) * 184 + 6, 88 + (i / 2) * 112);
         lv_obj_set_style_bg_color(tile, lv_color_hex(0x161b22), 0);
         lv_obj_set_style_border_color(tile, lv_color_hex(TILES[i].tint), 0);
         lv_obj_set_style_border_width(tile, 2, 0);
         lv_obj_set_style_radius(tile, 14, 0);
+        lv_obj_set_style_pad_all(tile, 0, 0);
+        lv_obj_set_style_clip_corner(tile, true, 0);
         lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(tile, on_tile, LV_EVENT_CLICKED, (void *)&TILES[i]);
+        TILES[i].tile = tile;
+
+        // §7.1: the countdown *is* a slow tinted wash rising from the bottom.
+        // Gradient rather than a flat block so the leading edge is a soft
+        // boundary — a hard line reads as a progress bar, which is the wrong
+        // register for something that should sit quietly in peripheral vision.
+        lv_obj_t *wash = lv_obj_create(tile);
+        lv_obj_set_width(wash, LV_PCT(100));
+        lv_obj_set_height(wash, 0);
+        lv_obj_set_style_border_width(wash, 0, 0);
+        lv_obj_set_style_radius(wash, 0, 0);
+        lv_obj_set_style_pad_all(wash, 0, 0);
+        lv_obj_set_style_bg_color(wash, lv_color_hex(TILES[i].tint), 0);
+        lv_obj_set_style_bg_grad_color(wash, lv_color_hex(0x161b22), 0);
+        lv_obj_set_style_bg_grad_dir(wash, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_bg_main_stop(wash, 255, 0);      // tint at the bottom
+        lv_obj_set_style_bg_grad_stop(wash, 0, 0);        // fading upward
+        lv_obj_set_style_bg_opa(wash, LV_OPA_40, 0);
+        lv_obj_clear_flag(wash, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(wash, LV_ALIGN_BOTTOM_MID, 0, 0);
+        TILES[i].wash = wash;
 
         lv_obj_t *name = lv_label_create(tile);
         lv_label_set_text(name, TILES[i].name);
         lv_obj_set_style_text_color(name, lv_color_hex(TILES[i].tint), 0);
-        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 0, 0);
+        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 8, 8);
 
         lv_obj_t *dots = lv_label_create(tile);
         lv_label_set_text(dots, TILES[i].dots);
         lv_obj_set_style_text_color(dots, lv_color_hex(0x8b949e), 0);
-        lv_obj_align(dots, LV_ALIGN_BOTTOM_LEFT, 0, 0);
+        lv_obj_align(dots, LV_ALIGN_BOTTOM_LEFT, 8, -8);
+
+        lv_obj_t *cd = lv_label_create(tile);
+        lv_label_set_text(cd, "--m");
+        lv_obj_set_style_text_font(cd, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(cd, lv_color_hex(0xe6edf3), 0);
+        lv_obj_align(cd, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+        TILES[i].countdown = cd;
     }
 
     g_readout = lv_label_create(scr);
     lv_label_set_text(g_readout, "tap a tile");
     lv_obj_set_style_text_color(g_readout, lv_color_hex(0x8b949e), 0);
     lv_obj_align(g_readout, LV_ALIGN_BOTTOM_MID, 0, -6);
+}
+
+/** The §5.2 tick, at the rate the product runs it. Measures its own cost:
+ *  R7 asks whether the wash fits the frame budget, and the honest answer is
+ *  how long seven of these take, not how it looks. */
+static void tick_cb(lv_timer_t *timer) {
+    LV_UNUSED(timer);
+    static uint32_t ticks;
+    static uint64_t total_us;
+
+    const int64_t t0 = esp_timer_get_time();
+    const uint32_t virt = (uint32_t)(t0 / 1000000) * TIME_SPEEDUP;
+
+    for (int i = 0; i < (int)(sizeof TILES / sizeof TILES[0]); i++) {
+        const uint32_t interval = (uint32_t)TILES[i].every_min * 60;
+        const uint32_t into     = virt % interval;
+        const uint32_t left     = interval - into;
+
+        // Against the *content* height, not TILE_H: the border insets the
+        // content box, so scaling by the nominal size both stops short of the
+        // bottom and saturates before the countdown reaches zero.
+        const int32_t box = lv_obj_get_content_height(TILES[i].tile);
+        lv_obj_set_height(TILES[i].wash, (int32_t)((int64_t)box * into / interval));
+        lv_obj_align(TILES[i].wash, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_label_set_text_fmt(TILES[i].countdown, "%" LV_PRIu32 "m", (left + 59) / 60);
+    }
+
+    total_us += (uint64_t)(esp_timer_get_time() - t0);
+    if (++ticks % 15 == 0) {
+        ESP_LOGI(TAG, "tick %" LV_PRIu32 ": %llu us mean to update 7 washes",
+                 ticks, total_us / ticks);
+    }
 }
 
 /** Who is actually on the bus. Worth printing before anything depends on it:
@@ -163,7 +242,11 @@ void app_main(void) {
     esp_log_level_set("i2c.master", ESP_LOG_INFO);
     ESP_LOGI(TAG, "touch probe says board is %s", v2 ? "V2 (CO5300/CST820)" : "V1 (SH8601/FT3168)");
 
-    if (bsp_display_lock(0)) { build_screen(); bsp_display_unlock(); }
+    if (bsp_display_lock(0)) {
+        build_screen();
+        lv_timer_create(tick_cb, 1000, NULL);      // §5.2's 1 Hz tick
+        bsp_display_unlock();
+    }
 
     if (audio_init(70) == ESP_OK) {
         vTaskDelay(pdMS_TO_TICKS(300));

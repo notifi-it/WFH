@@ -1,4 +1,9 @@
+version: "1.0.0"
 dependencies:
-  idf:
-    version: ">=5.0"
+  idf: ">=5.5,<6.1"
   joltwallet/littlefs: "^1.16"
+  # 1.x is the V1 board line (SH8601 + FT5x06). 2.x drives V2 silicon and
+  # aborts on this hardware — see §15.3.
+  waveshare/esp32_s3_touch_amoled_1_8:
+    version: "~1.1.4"
+    public: true

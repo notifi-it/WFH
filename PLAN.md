@@ -1211,7 +1211,7 @@ Every call site that currently does `ESP_LOGx(...)` on something worth rememberi
 | R4 | ~~Codec/PA chain~~ — **closed.** ES8311 opens via `esp_codec_dev`, §9 cues play through the amp gate | — | — | **closed by S3** |
 | R5 | Light sleep breaks a peripheral (touch wake, I2S after wake, tick cadence) | medium | medium | spike S3, §11 step 11 |
 | R6 | TZ/DST wrong — POSIX string, no zoneinfo on the board | low | high | §2.1 `tz` + `dst-forward` fixture |
-| R7 | LVGL full-frame effects (wash + grain) miss frame budget | low | low | still open — S1 drew static tiles, not the animated wash |
+| R7 | ~~LVGL effects miss frame budget~~ — **closed.** Wash costs 2.4ms at 1 Hz; the animated waterline costs 555us/frame at 30fps (1.7% of budget). The cliff is not the effect, it is `clip_corner` — see below | — | — | **closed** |
 
 **R1 is the one that could force a design change**, which is why it gets benchmarked before the build starts. There are field reports of the ESP32 SQLite port slowing to seconds per insert in the low thousands of rows on LittleFS — and 400-day retention (§3.4) means ~12,000 rows. The reported cases smell like per-write connection churn and no page cache, both of which this design already avoids (one long-lived connection, §3.4), but that is a hypothesis to test, not a fact to lean on. Mitigations in order: `PRAGMA cache_size` big enough to hold the whole ~1MB database in PSRAM, `page_size=4096` set before first write, and measuring again. **Kill switch:** `store_add_event` / `store_load_day` are the entire storage API — if SQLite still can't hold p99 under ~50ms per insert at 15k rows, swap the implementation for per-day JSONL append files and turn §13.3's history queries into a laptop script over `curl`-pulled files. `derive` and everything above it never know.
 
@@ -1278,5 +1278,7 @@ i2c scan (after touch reset): 0x18 0x20 0x34 0x38 0x51 0x6B    + FT3168
 ```
 
 That scan is also the cheapest possible board-health check, and worth keeping in bring-up permanently.
+
+3. **`clip_corner` is the frame-budget cliff, not the animation.** Clipping children to a rounded corner makes LVGL allocate a mask layer and blend the tile per-pixel on every redraw. At the 1 Hz tick that is invisible; at 30fps it pinned the LVGL task hard enough to starve the idle task and trip the task watchdog — with a backtrace deep in `lv_draw_layer_alloc_buf` that says nothing about corners. Removing it took the animated waterline to **555us/frame, 1.7% of a 33ms budget**, stable over thousands of frames. The lesson generalises: on this panel, per-pixel masking is the expensive thing, and moving geometry is nearly free.
 
 A failed spike changes the plan while the plan is still cheap to change. That is the entire budget: a day and a half before §11 step 1.
