@@ -10,3 +10,12 @@ CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y
 # QEMU has no PSRAM model — boot anyway instead of aborting (real board unaffected).
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# LittleFS mount recurses through lfs_dir_fetchmatch and needs far more than
+# the 3584-byte default. Overflowing it corrupts whatever sits after the
+# stack, which surfaces as an unrelated assert inside the flash mutex.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# The storage spike writes thousands of rows in one go; keep the watchdog
+# from calling a long synchronous=FULL run a hang.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
