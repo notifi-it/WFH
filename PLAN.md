@@ -55,6 +55,7 @@ The action table is authored once as JSON and generated into the firmware, so ch
 {
   "workStart": "09:00",
   "workEnd": "18:00",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
   "actions": [
     { "id": "stand", "name": "Stand break", "blurb": "Up on your feet for a minute.",
       "icon": "person-check", "tint": "#7fd4a8", "target": 10, "flow": "tap", "priority": 1,
@@ -181,7 +182,7 @@ The one exception is `cadence.times` in `actions.json` (`"11:30"`, `"16:30"`, �
 
 Local wall-clock time reappears exactly once more: at render, when a timestamp becomes "4m" on a tile or "14:32" in the header. That conversion happens in the UI layer only and is never fed back into the model.
 
-**Why this matters for timezones.** All slot arithmetic happens in the board's own local time (§5.1, via `mktime`/`localtime_r` against a `TZ` set at boot), and the board's clock is the only clock in the system — there is no second device whose timezone could disagree. The one real gap is the board itself: nothing auto-detects a new timezone if it physically moves (no GPS), so a relocated board needs its `TZ` updated and reflashed.
+**Why this matters for timezones.** All slot arithmetic happens in the board's own local time (§5.1, via `mktime`/`localtime_r` against a `TZ` set at boot). The `TZ` value is the `tz` field of §2.1's config, and it must be a **POSIX rule string** (`"GMT0BST,M3.5.0/1,M10.5.0"`) — ESP32's newlib has no zoneinfo database, so an IANA name like `Europe/London` means nothing on the board. The board's clock is the only clock in the system — there is no second device whose timezone could disagree. The one real gap is the board itself: nothing auto-detects a new timezone if it physically moves (no GPS), so a relocated board needs its `TZ` updated and reflashed.
 
 ### 3.2 Derivation
 
@@ -1162,7 +1163,7 @@ cJSON_AddBoolToObject(root,   "onBattery", g_on_battery);
 
 ## 11. Build order
 
-Firmware first, because it is the product and it is the long pole. Each step should end somewhere you can leave it.
+Firmware first, because it is the product and it is the long pole. Each step should end somewhere you can leave it. The three §15.3 spikes run before step 1 — a day and a half that decides whether §3.4 and §10 survive contact with the hardware.
 
 0. **The design loop** — `design/` renders board screens at 368×448 and screenshots them headlessly (see `design/README.md`). Needs no hardware and no ESP-IDF, so design iteration is never blocked behind a toolchain. Settle what the screens look like here; §7 transcribes the result.
 1. **Board bring-up** — ESP-IDF project, display, touch, LVGL hello-world, WiFi, NTP-set RTC. Confirms the hardware and the toolchain before any product logic exists. First act: read the revision label (§1) and run the vendor demo that matches it — V1 and V2 take different display and touch drivers.
@@ -1326,3 +1327,65 @@ static esp_err_t logs_get(httpd_req_t *req) {
 ```
 
 Every call site that currently does `ESP_LOGx(...)` on something worth remembering becomes `devlog_write(...)`, which does both — visible on serial live, and pullable over `curl` afterward for the 3am reboot nobody watched. Rotation is capped and automatic specifically so this can be sprinkled liberally without a slow flash-fill-up turning into its own bug.
+
+---
+
+## 15. Risks
+
+§11 orders the build; this section names what could sink it, what retires each risk, and the fallback where one exists. Three half-day spikes (§15.3) come before committing to the full build order — each exists to kill the risks marked with it.
+
+### 15.1 The register
+
+| # | Risk | Odds | Pain | Retired by |
+|---|---|---|---|---|
+| R1 | SQLite insert latency degrades with row count on LittleFS | medium | high | spike S2 |
+| R2 | Board in hand is V2 — different display + touch silicon than the V1 schematic this plan verified | high if buying now | medium | spike S1 |
+| R3 | AXP2101 rail/charging misconfig — dark panel, mistreated battery | medium | medium | spike S1 |
+| R4 | Codec/PA chain: silence, boot pop, idle hiss | medium | low | spike S3 |
+| R5 | Light sleep breaks a peripheral (touch wake, I2S after wake, tick cadence) | medium | medium | spike S3, §11 step 11 |
+| R6 | TZ/DST wrong — POSIX string, no zoneinfo on the board | low | high | §2.1 `tz` + `dst-forward` fixture |
+| R7 | LVGL full-frame effects (wash + grain) miss frame budget | low | low | design loop + spike S1 |
+
+**R1 is the one that could force a design change**, which is why it gets benchmarked before the build starts. There are field reports of the ESP32 SQLite port slowing to seconds per insert in the low thousands of rows on LittleFS — and 400-day retention (§3.4) means ~12,000 rows. The reported cases smell like per-write connection churn and no page cache, both of which this design already avoids (one long-lived connection, §3.4), but that is a hypothesis to test, not a fact to lean on. Mitigations in order: `PRAGMA cache_size` big enough to hold the whole ~1MB database in PSRAM, `page_size=4096` set before first write, and measuring again. **Kill switch:** `store_add_event` / `store_load_day` are the entire storage API — if SQLite still can't hold p99 under ~50ms per insert at 15k rows, swap the implementation for per-day JSONL append files and turn §13.3's history queries into a laptop script over `curl`-pulled files. `derive` and everything above it never know.
+
+**R2:** both revisions have official drivers — `espressif/esp_lcd_sh8601` for V1, `espressif/esp_lcd_co5300` for V2, FT3168 via the `ft5x06` touch driver family, CST820 via `esp_lcd_touch_cst816s`/`kodediy cst820` — so this is a *selection* problem, not a porting project. The risk is writing code against one before reading the label on the other. §11 step 1 already orders it: label first, vendor demo second (Waveshare's `waveshareteam/ESP32-S3-Touch-AMOLED-1.8` repo), product code last.
+
+**R3:** the display and codec rails hang off AXP2101 LDOs, so a wrong PMIC init is a *dark screen*, not an error message — bring-up must copy the vendor demo's rail config before trusting any of §10. Driver: `XPowersLib` (upstream has an ESP-IDF example; packaged as `cube32esp/xpowerslib`).
+
+**R6:** the fixture exists (`dst-forward.json`, §11.1); the config now carries the POSIX rule string (§2.1, §3.1a). The residual risk is authoring the string wrong once — which the header's visible date/time (§12) surfaces the same day.
+
+### 15.2 Scaffolding
+
+The two files the plan was missing, so step 1 starts from them rather than inventing them mid-bring-up.
+
+```
+# firmware/partitions.csv — 16MB flash
+nvs,      data, nvs,      0x9000,   24K
+phy_init, data, phy,      0xf000,   4K
+factory,  app,  factory,  0x10000,  4M
+storage,  data, littlefs, ,         10M
+```
+
+No OTA pair: settings changes are a reflash over the permanently-attached USB-C cable (§2.1), so A/B slots buy nothing but lost flash.
+
+```yaml
+# firmware/main/idf_component.yml — V1 parts; starred lines swap for V2
+dependencies:
+  lvgl/lvgl: "^9"                        # §7 snippets use v8 names — rename on adoption
+  espressif/esp_lcd_sh8601: "^2"         # * V2: espressif/esp_lcd_co5300
+  espressif/esp_lcd_touch_ft5x06: "^1"   # * V2: esp_lcd_touch_cst816s (or kodediy/esp_lcd_touch_cst820)
+  espressif/esp_codec_dev: "^1"
+  joltwallet/littlefs: "^1"
+  espressif/mdns: "^1"
+  cube32esp/xpowerslib: "^0.3"           # AXP2101
+```
+
+SQLite is not in the registry: vendor `nopnop2002/esp32-idf-sqlite3` (the IDF-5-updated fork) into `components/sqlite3` and pin the commit in a README line. WiFi credentials ride the same path as the action table — `config/secrets.json`, gitignored, generated into `wifi.g.h` by the same `gen-config` step.
+
+### 15.3 Three spikes, then the build order
+
+- **S1 — panel, touch, PMIC (half day).** Vendor demo for the revision in hand, then an LVGL hello-world against the pinned components with the PMIC rails configured from scratch. Retires R2, R3, and R7 (put the grain overlay in the hello-world).
+- **S2 — storage under load (half day).** `store_open` exactly as §3.4 (EXCLUSIVE + WAL, verified), then insert 15,000 events — a full retention window with margin — measuring per-insert latency at 1k / 5k / 15k. Pass is p99 < 50ms with `synchronous=FULL`. Retires or triggers R1's kill switch while the swap still costs nothing.
+- **S3 — sound and sleep (half day).** `esp_codec_dev` beep through the PA gate (no boot pop, no idle hiss, silent when `PA_CTRL` is low), then auto light sleep on: confirm touch wakes the panel, I2S plays cleanly after wake, and the 1 Hz tick keeps cadence. Retires R4, most of R5.
+
+A failed spike changes the plan while the plan is still cheap to change. That is the entire budget: a day and a half before §11 step 1.
