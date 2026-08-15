@@ -11,30 +11,37 @@ typedef struct { const char *name; int seconds; const char *cue; } stretch_def_t
 
 static const action_def_t ACTIONS[ACTIONS_COUNT] = {
     { .id = "stand", .name = "Stand break",
+      .blurb = "Up on your feet for a minute.",
       .target = 10, .priority = 1, .flow = FLOW_TAP,
       .cadence = { .kind = CADENCE_INTERVAL, .every_min = 40 } },
 
     { .id = "water", .name = "Water",
+      .blurb = "Glass of water. Refill while you are up.",
       .target = 8, .priority = 1, .flow = FLOW_TAP,
       .cadence = { .kind = CADENCE_INTERVAL, .every_min = 45 } },
 
     { .id = "roll", .name = "Shoulder roll",
+      .blurb = "Ten slow rolls back, then drop the shoulders.",
       .target = 8, .priority = 1, .flow = FLOW_TAP,
       .cadence = { .kind = CADENCE_INTERVAL, .every_min = 60 } },
 
     { .id = "snack", .name = "Snack",
+      .blurb = "Something small before the slump.",
       .target = 2, .priority = 2, .flow = FLOW_TAP,
       .cadence = { .kind = CADENCE_FIXED, .n_times = 2, .times = { "10:45", "15:30" } } },
 
     { .id = "lunch", .name = "Lunch",
+      .blurb = "Away from the desk.",
       .target = 1, .priority = 2, .flow = FLOW_TAP,
       .cadence = { .kind = CADENCE_FIXED, .n_times = 1, .times = { "13:00" } } },
 
     { .id = "stretch", .name = "Stretches",
+      .blurb = "Four stretches, about three minutes.",
       .target = 2, .priority = 3, .flow = FLOW_STRETCH,
       .cadence = { .kind = CADENCE_FIXED, .n_times = 2, .times = { "11:30", "16:30" } } },
 
     { .id = "shutdown", .name = "Shut down",
+      .blurb = "Close the laptop. That is the day.",
       .target = 1, .priority = 2, .flow = FLOW_TAP,
       .cadence = { .kind = CADENCE_FIXED, .n_times = 1, .times = { "18:00" } } },
 };

@@ -23,6 +23,7 @@ typedef struct {
 typedef struct {
     const char *id;
     const char *name;
+    const char *blurb;
     int         target;
     int         priority;                  // higher sorts first in `due`
     flow_t      flow;

@@ -25,6 +25,7 @@ const cadence = (c) => {
 };
 
 const actions = cfg.actions.map((a) => `    { .id = ${str(a.id)}, .name = ${str(a.name)},
+      .blurb = ${str(a.blurb)},
       .target = ${a.target}, .priority = ${a.priority}, .flow = ${FLOWS[a.flow]},
       .cadence = ${cadence(a.cadence)} },`).join('\n\n');
 

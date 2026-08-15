@@ -1,6 +1,6 @@
-// §7: the grid is the default view; the card takes over when something is
-// due. Both are built once and updated in place — see §6 on why rebuilding
-// the card every tick is wrong.
+// §7. Three screens: the grid (default), the checklist card when several
+// things are due at once, and a per-action popup opened by tapping a tile.
+// Built once, updated in place — see §6 on why rebuilding every tick is wrong.
 #include "ui.h"
 
 #include <stdio.h>
@@ -15,39 +15,83 @@
 
 static const char *TAG = "ui";
 
+// No header bar: the grid owns all 448px. Four rows — three pairs plus the
+// full-width shutdown — at 104px with 8px gutters comes to 446.
 #define TILE_W  172
 #define TILE_H  104
+#define GAP       8
 #define GRID_X0   6
-#define GRID_Y0  88
+#define GRID_Y0   6
 
-// §2's tints, in config order. Kept here rather than in actions.json because
-// they are a property of this screen, not of the schedule.
 static const uint32_t TINT[] = {
     0x7fd4a8, 0x6ec3e0, 0xb6a3e8, 0xe8b06a, 0xe8926a, 0xe0d16a, 0x8f9aa8,
 };
 
 card_t g_card;
 
-static lv_obj_t *g_grid, *g_card_scr;
-static lv_obj_t *g_clock, *g_date, *g_sound_icon;
-static lv_obj_t *g_tile[ACTIONS_MAX], *g_wash[ACTIONS_MAX];
-static lv_obj_t *g_count[ACTIONS_MAX], *g_cd[ACTIONS_MAX];
+static lv_obj_t *g_grid, *g_card_scr, *g_popup;
+static lv_obj_t *g_tile[ACTIONS_MAX], *g_wash[ACTIONS_MAX], *g_cd[ACTIONS_MAX];
 static lv_obj_t *g_rows[ACTIONS_MAX], *g_checks[ACTIONS_MAX];
 
-// The water surface. Only the crest is animated — the body below it is a
-// static gradient — because a fluid simulation is per-pixel work and a
-// moving waterline is a polyline. That is the whole trick.
-#define WAVE_PTS 25
-static lv_obj_t         *g_wave[ACTIONS_MAX];
-static lv_point_precise_t g_wave_pts[ACTIONS_MAX][WAVE_PTS];
-static uint32_t          g_wave_phase;
+// The popup is one screen reused for whichever tile was tapped.
+static int       g_popup_action = -1;
+static lv_obj_t *g_pop_name, *g_pop_blurb, *g_pop_state, *g_pop_sound, *g_pop_done;
 
-// ----------------------------------------------------------------- helpers
+// §7.2's dot row. Four states, and skipped vs missed stay visually distinct:
+// deciding not to eat lunch and forgetting to log lunch are different facts.
+#define MAX_DOTS 14
+typedef enum { DOT_HIDDEN, DOT_DONE, DOT_SKIP, DOT_MISS, DOT_PEND } dot_state_t;
+static lv_obj_t   *g_dot[ACTIONS_MAX][MAX_DOTS];
+static dot_state_t g_dot_state[ACTIONS_MAX][MAX_DOTS];
+static int         g_dot_shown[ACTIONS_MAX];
+
+// The waterline. Only the crest is animated — the body below is a static
+// gradient — because a fluid simulation is per-pixel work and a moving
+// surface is geometry.
+#define WAVE_PTS 25
+static lv_obj_t          *g_wave[ACTIONS_MAX];
+static lv_point_precise_t g_wave_pts[ACTIONS_MAX][WAVE_PTS];
+static uint32_t           g_wave_phase;
+
+// ------------------------------------------------------------------- popup
+
+static void popup_refresh(void) {
+    const int a = g_popup_action;
+    if (a < 0 || !g_pop_name) return;
+
+    lv_label_set_text(g_pop_name, g_settings.actions[a].name);
+    lv_obj_set_style_text_color(g_pop_name, lv_color_hex(TINT[a]), 0);
+    lv_label_set_text(g_pop_blurb, g_settings.actions[a].blurb);
+    lv_obj_set_style_bg_color(g_pop_done, lv_color_hex(TINT[a]), 0);
+
+    const time_t now = time(NULL), next = g_view.next[a];
+    bool due = false;
+    for (int i = 0; i < g_view.n_due; i++) if (g_view.due[i] == a) due = true;
+
+    if (due) {
+        lv_label_set_text(g_pop_state, "Due now");
+    } else if (next > now) {
+        lv_label_set_text_fmt(g_pop_state, "%d done  -  next in %dm",
+                              g_view.counts[a], (int)((next - now + 59) / 60));
+    } else {
+        lv_label_set_text_fmt(g_pop_state, "%d done  -  nothing left today", g_view.counts[a]);
+    }
+    lv_label_set_text(g_pop_sound, g_settings_sound ? LV_SYMBOL_VOLUME_MAX : LV_SYMBOL_MUTE);
+    lv_obj_set_style_text_color(g_pop_sound, lv_color_hex(g_settings_sound ? 0xE6EDF3 : 0x5A636D), 0);
+}
 
 static void on_tile_cb(lv_event_t *e) {
-    const int a = (int)(intptr_t)lv_event_get_user_data(e);
-    input_done(a);                       // §7.1: tapping a tile logs it outright
+    g_popup_action = (int)(intptr_t)lv_event_get_user_data(e);
+    popup_refresh();
+    lv_screen_load_anim(g_popup, LV_SCR_LOAD_ANIM_FADE_IN, 150, 0, false);
 }
+
+static void on_pop_done(lv_event_t *e)   { LV_UNUSED(e); if (g_popup_action >= 0) input_done(g_popup_action); ui_show_grid(); }
+static void on_pop_skip(lv_event_t *e)   { LV_UNUSED(e); if (g_popup_action >= 0) input_skip(g_popup_action); ui_show_grid(); }
+static void on_pop_close(lv_event_t *e)  { LV_UNUSED(e); ui_show_grid(); }
+static void on_sound_icon(lv_event_t *e) { LV_UNUSED(e); input_toggle_sound(); }
+
+// --------------------------------------------------------------- card hooks
 
 static void on_row_toggle(lv_event_t *e) {
     card_toggle(&g_card, (int)(intptr_t)lv_event_get_user_data(e));
@@ -57,10 +101,9 @@ static void on_row_skip(lv_event_t *e) {
     card_skip_row(&g_card, (int)(intptr_t)lv_event_get_user_data(e), ui_card_host());
     ui_show_card();
 }
-static void on_confirm(lv_event_t *e)  { LV_UNUSED(e); card_confirm(&g_card, ui_card_host()); ui_show_card(); }
-static void on_delay(lv_event_t *e)    { LV_UNUSED(e); card_delay_all(&g_card, &g_day, time(NULL), ui_card_host()); }
-static void on_dismiss(lv_event_t *e)  { LV_UNUSED(e); card_dismiss(&g_card, ui_card_host()); }
-static void on_sound_icon(lv_event_t *e) { LV_UNUSED(e); input_toggle_sound(); }
+static void on_confirm(lv_event_t *e) { LV_UNUSED(e); card_confirm(&g_card, ui_card_host()); ui_show_card(); }
+static void on_delay(lv_event_t *e)   { LV_UNUSED(e); card_delay_all(&g_card, &g_day, time(NULL), ui_card_host()); }
+static void on_dismiss(lv_event_t *e) { LV_UNUSED(e); card_dismiss(&g_card, ui_card_host()); }
 
 /** §7.3a: one X, built one way, everywhere it appears. */
 static void x_button(lv_obj_t *parent, lv_event_cb_t on_close) {
@@ -82,37 +125,11 @@ static void build_grid(void) {
     lv_obj_set_style_bg_color(g_grid, lv_color_hex(0x0d1117), 0);
     lv_obj_clear_flag(g_grid, LV_OBJ_FLAG_SCROLLABLE);
 
-    lv_obj_t *hdr = lv_obj_create(g_grid);
-    lv_obj_set_size(hdr, 368, 80);
-    lv_obj_set_pos(hdr, 0, 0);
-    lv_obj_set_style_bg_color(hdr, lv_color_hex(0x161b22), 0);
-    lv_obj_set_style_border_width(hdr, 0, 0);
-    lv_obj_set_style_radius(hdr, 0, 0);
-    lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
-
-    g_clock = lv_label_create(hdr);
-    lv_obj_set_style_text_font(g_clock, &lv_font_montserrat_24, 0);
-    lv_obj_set_style_text_color(g_clock, lv_color_hex(0xe6edf3), 0);
-    lv_obj_align(g_clock, LV_ALIGN_LEFT_MID, 4, -8);
-
-    g_date = lv_label_create(hdr);
-    lv_obj_set_style_text_color(g_date, lv_color_hex(0x8b949e), 0);
-    lv_obj_align(g_date, LV_ALIGN_LEFT_MID, 4, 14);
-
-    g_sound_icon = lv_label_create(hdr);
-    lv_obj_set_style_text_font(g_sound_icon, &lv_font_montserrat_24, 0);
-    lv_obj_align(g_sound_icon, LV_ALIGN_RIGHT_MID, -14, 0);
-    lv_obj_add_flag(g_sound_icon, LV_OBJ_FLAG_CLICKABLE);
-    lv_obj_set_ext_click_area(g_sound_icon, 16);       // 24px glyph, 56px target
-    lv_obj_add_event_cb(g_sound_icon, on_sound_icon, LV_EVENT_CLICKED, NULL);
-
     for (int i = 0; i < g_settings.n_actions; i++) {
         const bool last = (i == g_settings.n_actions - 1);
-        // §7.1: shutdown spans the final row — it is the action that ends the
-        // day, so the layout reads as a full stop.
-        const int w = last ? (TILE_W * 2 + 12) : TILE_W;
-        const int x = last ? GRID_X0 : (i % 2) * (TILE_W + 12) + GRID_X0;
-        const int y = GRID_Y0 + (i / 2) * (TILE_H + 8);
+        const int w = last ? (TILE_W * 2 + GAP + 4) : TILE_W;
+        const int x = last ? GRID_X0 : (i % 2) * (TILE_W + GAP + 4) + GRID_X0;
+        const int y = GRID_Y0 + (i / 2) * (TILE_H + GAP);
 
         lv_obj_t *t = lv_obj_create(g_grid);
         lv_obj_set_size(t, w, TILE_H);
@@ -122,11 +139,10 @@ static void build_grid(void) {
         lv_obj_set_style_border_width(t, 2, 0);
         lv_obj_set_style_radius(t, 14, 0);
         lv_obj_set_style_pad_all(t, 0, 0);
-        // No clip_corner. Clipping children to the rounded corner forces LVGL
-        // to allocate a mask layer and blend the tile per-pixel on every
-        // redraw — affordable at the 1 Hz tick, ruinous at 30fps, and it was
-        // what pinned the LVGL task hard enough to trip the watchdog. The
-        // cost is square corners on the wash inside a rounded border.
+        // No clip_corner: clipping children to the rounded corner makes LVGL
+        // allocate a mask layer and blend per-pixel on every redraw. Fine at
+        // 1 Hz, but at 30fps it starved the LVGL task and tripped the
+        // watchdog. Cost is square corners on the wash inside a round border.
         lv_obj_clear_flag(t, LV_OBJ_FLAG_SCROLLABLE);
         lv_obj_add_event_cb(t, on_tile_cb, LV_EVENT_CLICKED, (void *)(intptr_t)i);
         g_tile[i] = t;
@@ -160,9 +176,14 @@ static void build_grid(void) {
         lv_obj_set_style_text_color(name, lv_color_hex(TINT[i]), 0);
         lv_obj_align(name, LV_ALIGN_TOP_LEFT, 8, 8);
 
-        g_count[i] = lv_label_create(t);
-        lv_obj_set_style_text_color(g_count[i], lv_color_hex(0x8b949e), 0);
-        lv_obj_align(g_count[i], LV_ALIGN_BOTTOM_LEFT, 8, -8);
+        for (int d = 0; d < MAX_DOTS; d++) {
+            lv_obj_t *dot = lv_obj_create(t);
+            lv_obj_set_style_border_width(dot, 0, 0);
+            lv_obj_set_style_pad_all(dot, 0, 0);
+            lv_obj_clear_flag(dot, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+            lv_obj_add_flag(dot, LV_OBJ_FLAG_HIDDEN);
+            g_dot[i][d] = dot;
+        }
 
         g_cd[i] = lv_label_create(t);
         lv_obj_set_style_text_font(g_cd[i], &lv_font_montserrat_24, 0);
@@ -186,8 +207,8 @@ static void build_card(void) {
 
     for (int i = 0; i < ACTIONS_MAX; i++) {
         lv_obj_t *row = lv_obj_create(g_card_scr);
-        lv_obj_set_size(row, 336, 56);
-        lv_obj_set_pos(row, 16, 72 + i * 62);
+        lv_obj_set_size(row, 336, 52);
+        lv_obj_set_pos(row, 16, 68 + i * 58);
         lv_obj_set_style_border_width(row, 0, 0);
         lv_obj_set_style_radius(row, 12, 0);
         lv_obj_set_style_pad_all(row, 8, 0);
@@ -199,7 +220,7 @@ static void build_card(void) {
         lv_obj_add_event_cb(chk, on_row_toggle, LV_EVENT_CLICKED, (void *)(intptr_t)i);
 
         lv_obj_t *skip = lv_button_create(row);
-        lv_obj_set_size(skip, 72, 40);
+        lv_obj_set_size(skip, 68, 36);
         lv_obj_align(skip, LV_ALIGN_RIGHT_MID, 0, 0);
         lv_obj_set_style_bg_color(skip, lv_color_hex(0x21262d), 0);
         lv_obj_t *sl = lv_label_create(skip);
@@ -232,47 +253,152 @@ static void build_card(void) {
     x_button(g_card_scr, on_dismiss);
 }
 
+// ------------------------------------------------------------------- popup
+
+static void build_popup(void) {
+    g_popup = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(g_popup, lv_color_hex(0x0d1117), 0);
+    lv_obj_clear_flag(g_popup, LV_OBJ_FLAG_SCROLLABLE);
+
+    // The sound toggle lives here now the header is gone. §7.5's point still
+    // holds — the icon *is* the state — it just needs a home, and the popup
+    // is the one screen you always pass through to answer anything.
+    g_pop_sound = lv_label_create(g_popup);
+    lv_obj_set_style_text_font(g_pop_sound, &lv_font_montserrat_24, 0);
+    lv_obj_align(g_pop_sound, LV_ALIGN_TOP_LEFT, 16, 18);
+    lv_obj_add_flag(g_pop_sound, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_ext_click_area(g_pop_sound, 16);
+    lv_obj_add_event_cb(g_pop_sound, on_sound_icon, LV_EVENT_CLICKED, NULL);
+
+    g_pop_name = lv_label_create(g_popup);
+    lv_obj_set_style_text_font(g_pop_name, &lv_font_montserrat_24, 0);
+    lv_obj_align(g_pop_name, LV_ALIGN_TOP_LEFT, 16, 76);
+
+    g_pop_blurb = lv_label_create(g_popup);
+    lv_obj_set_width(g_pop_blurb, 336);
+    lv_label_set_long_mode(g_pop_blurb, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_color(g_pop_blurb, lv_color_hex(0x8b949e), 0);
+    lv_obj_align(g_pop_blurb, LV_ALIGN_TOP_LEFT, 16, 118);
+
+    g_pop_state = lv_label_create(g_popup);
+    lv_obj_set_style_text_color(g_pop_state, lv_color_hex(0x6e7681), 0);
+    lv_obj_align(g_pop_state, LV_ALIGN_TOP_LEFT, 16, 200);
+
+    g_pop_done = lv_button_create(g_popup);
+    lv_obj_set_size(g_pop_done, 336, 84);
+    lv_obj_align(g_pop_done, LV_ALIGN_BOTTOM_MID, 0, -104);
+    lv_obj_t *dlab = lv_label_create(g_pop_done);
+    lv_label_set_text(dlab, "Done");
+    lv_obj_set_style_text_font(dlab, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(dlab, lv_color_hex(0x0d1117), 0);
+    lv_obj_center(dlab);
+    lv_obj_add_event_cb(g_pop_done, on_pop_done, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *skip = lv_button_create(g_popup);
+    lv_obj_set_size(skip, 336, 60);
+    lv_obj_align(skip, LV_ALIGN_BOTTOM_MID, 0, -20);
+    lv_obj_set_style_bg_color(skip, lv_color_hex(0x21262d), 0);
+    lv_obj_t *slab = lv_label_create(skip);
+    lv_label_set_text(slab, "Skip");
+    lv_obj_center(slab);
+    lv_obj_add_event_cb(skip, on_pop_skip, LV_EVENT_CLICKED, NULL);
+
+    x_button(g_popup, on_pop_close);
+}
+
 // ----------------------------------------------------------------- updates
 
-void ui_sound_icon_update(void) {
-    if (!g_sound_icon) return;
-    lv_label_set_text(g_sound_icon, g_settings_sound ? LV_SYMBOL_VOLUME_MAX : LV_SYMBOL_MUTE);
-    // Muted is dimmed as well as different: the shape carries the meaning,
-    // the weight confirms it. Colour alone would not survive the tints.
-    lv_obj_set_style_text_color(g_sound_icon,
-        lv_color_hex(g_settings_sound ? 0xE6EDF3 : 0x5A636D), 0);
+/** Paint a dot only when its state actually changed. Every style write
+ *  invalidates the tile, and the tile also hosts a 30fps waterline —
+ *  repainting 70 unchanged dots a second would double the redraw work. */
+static void dot_set(int a, int d, dot_state_t s, uint32_t tint) {
+    if (g_dot_state[a][d] == s) return;
+    g_dot_state[a][d] = s;
+
+    lv_obj_t *o = g_dot[a][d];
+    if (s == DOT_HIDDEN) { lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN); return; }
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+
+    switch (s) {
+    case DOT_DONE:                                     // filled, action tint
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(o, lv_color_hex(tint), 0);
+        lv_obj_set_style_border_width(o, 0, 0);
+        break;
+    case DOT_SKIP:                                     // mid-grey solid
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(o, lv_color_hex(0x6e7681), 0);
+        lv_obj_set_style_border_width(o, 0, 0);
+        break;
+    case DOT_MISS:                                     // hollow ring
+        lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_color(o, lv_color_hex(0x6e7681), 0);
+        lv_obj_set_style_border_width(o, 1, 0);
+        break;
+    default:                                           // pending: dark solid
+        lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+        lv_obj_set_style_bg_color(o, lv_color_hex(0x30363d), 0);
+        lv_obj_set_style_border_width(o, 0, 0);
+        break;
+    }
 }
+
+static void dots_refresh(int a) {
+    const int done = g_view.counts[a], skip = g_view.skipped[a], miss = g_view.missed[a];
+
+    // An overshoot grows the row rather than truncating: the day did what it
+    // did, and a tile that hides work is worse than one that runs long.
+    int n = done + skip + miss;
+    if (n < g_settings.actions[a].target) n = g_settings.actions[a].target;
+    if (n > MAX_DOTS) n = MAX_DOTS;
+
+    if (n != g_dot_shown[a]) {                          // lay the row out once
+        g_dot_shown[a] = n;
+        const int32_t avail = lv_obj_get_content_width(g_tile[a]) - 16 - 56;
+        int pitch = n > 0 ? (int)(avail / n) : 11;
+        if (pitch > 11) pitch = 11;
+        const int size = (pitch - 3) < 4 ? 4 : (pitch - 3);
+        for (int d = 0; d < n; d++) {
+            lv_obj_set_size(g_dot[a][d], size, size);
+            lv_obj_set_style_radius(g_dot[a][d], size, 0);
+            lv_obj_align(g_dot[a][d], LV_ALIGN_BOTTOM_LEFT, 8 + d * pitch, -12);
+        }
+        for (int d = n; d < MAX_DOTS; d++) dot_set(a, d, DOT_HIDDEN, 0);
+    }
+
+    // Fixed order — done, skipped, missed, then pending — so a tile's dots
+    // never reshuffle as the day fills in.
+    for (int d = 0; d < n; d++) {
+        const dot_state_t s = d < done               ? DOT_DONE
+                            : d < done + skip        ? DOT_SKIP
+                            : d < done + skip + miss ? DOT_MISS
+                                                     : DOT_PEND;
+        dot_set(a, d, s, TINT[a]);
+    }
+}
+
+void ui_sound_icon_update(void) { popup_refresh(); }
 
 void ui_refresh(void) {
     const time_t now = time(NULL);
-    struct tm tm;
-    localtime_r(&now, &tm);
-
-    char buf[32];
-    strftime(buf, sizeof buf, "%H:%M", &tm);
-    lv_label_set_text(g_clock, buf);
-    strftime(buf, sizeof buf, "%a %d %b", &tm);
-    lv_label_set_text(g_date, buf);
 
     for (int i = 0; i < g_settings.n_actions; i++) {
-        const int done = g_view.counts[i];
-        lv_label_set_text_fmt(g_count[i], "%d of %d", done, g_settings.actions[i].target);
+        dots_refresh(i);
 
         const time_t next = g_view.next[i];
         if (next > now) {
-            const int mins = (int)((next - now + 59) / 60);
-            lv_label_set_text_fmt(g_cd[i], "%dm", mins);
+            lv_label_set_text_fmt(g_cd[i], "%dm", (int)((next - now + 59) / 60));
 
-            // The wash is the countdown: the fraction of the approach already
-            // elapsed. Interval actions fill across their whole cadence; fixed
-            // ones fill across the final hour, because a wash creeping up over
-            // the four hours before lunch would be imperceptible anyway, and
-            // the last hour is when it carries information.
+            // The wash is the countdown: how much of the approach has elapsed.
+            // Interval actions fill across their whole cadence; fixed ones
+            // across the final hour, since a wash creeping up over the four
+            // hours before lunch would be imperceptible anyway.
             const int32_t box = lv_obj_get_content_height(g_tile[i]);
             const time_t span = (g_settings.actions[i].cadence.kind == CADENCE_INTERVAL)
                                 ? (time_t)g_settings.actions[i].cadence.every_min * 60
                                 : 3600;
-            const time_t into = span - (next - now) > 0 ? span - (next - now) : 0;
+            time_t into = span - (next - now);
+            if (into < 0) into = 0;
             lv_obj_set_height(g_wash[i], (int32_t)((int64_t)box * into / span));
         } else {
             lv_label_set_text(g_cd[i], "--");
@@ -280,11 +406,13 @@ void ui_refresh(void) {
         }
         lv_obj_align(g_wash[i], LV_ALIGN_BOTTOM_MID, 0, 0);
     }
-    ui_sound_icon_update();
+    if (lv_screen_active() == g_popup) popup_refresh();
 }
 
 void ui_show_grid(void) {
-    if (lv_screen_active() != g_grid) lv_screen_load_anim(g_grid, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+    if (lv_screen_active() != g_grid) {
+        lv_screen_load_anim(g_grid, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
+    }
 }
 
 void ui_show_card(void) {
@@ -301,19 +429,21 @@ void ui_show_card(void) {
             lv_obj_add_flag(g_rows[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
-    if (lv_screen_active() != g_card_scr) {
+    // Never take the screen away from a popup the user is mid-decision on.
+    if (lv_screen_active() != g_card_scr && lv_screen_active() != g_popup) {
         lv_screen_load_anim(g_card_scr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
     }
 }
 
-/** ~30fps, and only the waterline moves. Measures its own cost so the
- *  "can the panel do a water effect" question has a number attached. */
+/** ~30fps, and only the waterline moves. */
 static void wave_cb(lv_timer_t *timer) {
     LV_UNUSED(timer);
     static uint32_t frames;
     static uint64_t total_us;
-    const int64_t t0 = esp_timer_get_time();
 
+    if (lv_screen_active() != g_grid) return;      // nothing to animate off-grid
+
+    const int64_t t0 = esp_timer_get_time();
     g_wave_phase += 12;
 
     for (int i = 0; i < g_settings.n_actions; i++) {
@@ -325,20 +455,19 @@ static void wave_cb(lv_timer_t *timer) {
         const int32_t w = lv_obj_get_content_width(g_tile[i]);
         const int32_t crest = box - h;
         for (int p = 0; p < WAVE_PTS; p++) {
-            const int32_t x = w * p / (WAVE_PTS - 1);
-            // Two sines at different rates so the crest never looks like a
-            // repeating sawtooth; amplitude stays under 3px so it reads as
-            // surface tension rather than a wave machine.
+            // Two sines at different rates so the crest never reads as a
+            // repeating sawtooth; amplitude under 3px keeps it surface
+            // tension rather than a wave machine.
             const int32_t a = lv_trigo_sin((int16_t)(g_wave_phase + p * 14)) * 3 / 32767;
             const int32_t b = lv_trigo_sin((int16_t)(g_wave_phase * 2 + p * 23)) * 2 / 32767;
-            g_wave_pts[i][p].x = x;
+            g_wave_pts[i][p].x = w * p / (WAVE_PTS - 1);
             g_wave_pts[i][p].y = crest + a + b;
         }
         lv_line_set_points(g_wave[i], g_wave_pts[i], WAVE_PTS);
     }
 
     total_us += (uint64_t)(esp_timer_get_time() - t0);
-    if (++frames % 150 == 0) {
+    if (++frames % 300 == 0) {
         ESP_LOGI(TAG, "wave: %llu us/frame over %" LV_PRIu32 " frames", total_us / frames, frames);
     }
 }
@@ -349,7 +478,10 @@ static void host_done(int a, void *ctx)    { LV_UNUSED(ctx); input_done(a); }
 static void host_skip(int a, void *ctx)    { LV_UNUSED(ctx); input_skip(a); }
 static void host_card(void *ctx)           { LV_UNUSED(ctx); ui_show_card(); }
 static void host_grid(void *ctx)           { LV_UNUSED(ctx); ui_show_grid(); }
-static void host_stretch(int a, void *ctx) { LV_UNUSED(ctx); ESP_LOGI(TAG, "stretch due: %s (flow not built yet)", g_settings.actions[a].id); }
+static void host_stretch(int a, void *ctx) {
+    LV_UNUSED(ctx);
+    ESP_LOGI(TAG, "stretch due: %s (guided flow not built yet)", g_settings.actions[a].id);
+}
 
 static const card_host_t HOST = {
     .log_done = host_done, .log_skip = host_skip,
@@ -362,7 +494,8 @@ const card_host_t *ui_card_host(void) { return &HOST; }
 void ui_build(void) {
     build_grid();
     build_card();
+    build_popup();
     ui_refresh();
-    lv_timer_create(wave_cb, 33, NULL);        // ~30fps waterline
+    lv_timer_create(wave_cb, 33, NULL);
     lv_screen_load(g_grid);
 }
