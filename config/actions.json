@@ -26,11 +26,7 @@
 
     { "id": "stretch", "name": "Stretches", "blurb": "Four stretches, about three minutes.",
       "icon": "sun", "tint": "#e0d16a", "target": 2, "flow": "stretch", "priority": 3,
-      "cadence": { "kind": "fixed", "times": ["11:30", "16:30"] } },
-
-    { "id": "shutdown", "name": "Shut down", "blurb": "Close the laptop. That is the day.",
-      "icon": "moon", "tint": "#8f9aa8", "target": 1, "flow": "tap", "priority": 2,
-      "cadence": { "kind": "fixed", "times": ["18:00"] } }
+      "cadence": { "kind": "fixed", "times": ["11:30", "16:30"] } }
   ],
   "stretches": [
     { "name": "Chin tucks",          "seconds": 30, "cue": "Draw the chin straight back. Hold, release, repeat." },

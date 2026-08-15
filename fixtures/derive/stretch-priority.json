@@ -9,7 +9,7 @@
     "missed": { "stand": 2, "water": 2, "roll": 1 },
     "next": {
       "stand": "11:40", "water": "12:00", "roll": "12:00", "snack": "15:30",
-      "lunch": "13:00", "stretch": "16:30", "shutdown": "18:00"
+      "lunch": "13:00", "stretch": "16:30"
     },
     "due": ["stretch", "snack", "stand", "water", "roll"]
   }

@@ -26,7 +26,7 @@ What makes a future web version cheap is the event log in §3 and the snapshot s
 
 The board sits on the desk and prompts the person sitting at it. It does not chase them elsewhere: no phone push, no notifications away from the desk. If you are not there, you are not there.
 
-**Explicitly out of scope:** eye breaks (20-20-20), the lunchtime walk, any "silence for the day" control, and any companion client. No historical views in v1 — see §13.
+**Explicitly out of scope:** eye breaks (20-20-20), the lunchtime walk, any "silence for the day" control, any companion client, and the end-of-day shut-down prompt (cut after seeing it on the board — it was the one tile that never told you anything you did not already know). No historical views in v1 — see §13.
 
 ---
 
@@ -40,7 +40,6 @@ The board sits on the desk and prompts the person sitting at it. It does not cha
 | Snack | 10:45, 15:30 | 2 | amber `#e8b06a` | single tap |
 | Lunch | 13:00 | 1 | orange `#e8926a` | single tap |
 | Stretches | 11:30, 16:30 | 2 | yellow `#e0d16a` | guided, 4 steps |
-| Shut down | 18:00 | 1 | grey `#8f9aa8` | single tap |
 
 Working hours 09:00–18:00. No prompts outside the window, save a 30-minute grace past `workEnd` that exists so the 18:00 shut-down card can be raised and answered (§5.2). Timers reset at 09:00 the next day.
 
@@ -498,7 +497,7 @@ The scenarios were mutation-checked the same way as `derive`: broken row lookup,
 
 ### 7.1 Grid (default)
 
-- 7 tiles, 2 columns, `shutdown` spanning the full final row — it is the one action that ends the day, so the layout reads as a full stop
+- 6 tiles, 2 columns, 3 even rows at 140px — no header bar, so the grid owns all 448px
 - Each tile: icon, name, progress dots, countdown in minutes
 - **Countdown** renders as a slow tinted wash rising from the bottom of the tile as the slot approaches
 - **Grain** overlay, drifting in 6 discrete steps so it reads as film grain rather than a sliding gradient

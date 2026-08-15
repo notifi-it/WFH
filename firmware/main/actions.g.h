@@ -6,7 +6,7 @@
 
 typedef struct { const char *name; int seconds; const char *cue; } stretch_def_t;
 
-#define ACTIONS_COUNT   7
+#define ACTIONS_COUNT   6
 #define STRETCH_COUNT   4
 
 static const action_def_t ACTIONS[ACTIONS_COUNT] = {
@@ -39,11 +39,6 @@ static const action_def_t ACTIONS[ACTIONS_COUNT] = {
       .blurb = "Four stretches, about three minutes.",
       .target = 2, .priority = 3, .flow = FLOW_STRETCH,
       .cadence = { .kind = CADENCE_FIXED, .n_times = 2, .times = { "11:30", "16:30" } } },
-
-    { .id = "shutdown", .name = "Shut down",
-      .blurb = "Close the laptop. That is the day.",
-      .target = 1, .priority = 2, .flow = FLOW_TAP,
-      .cadence = { .kind = CADENCE_FIXED, .n_times = 1, .times = { "18:00" } } },
 };
 
 static const stretch_def_t STRETCHES[STRETCH_COUNT] = {

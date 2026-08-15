@@ -155,7 +155,6 @@ static const fx_kv_t replay_idempotent_next[] = {
     { "roll", "14:00" },
     { "snack", "15:30" },
     { "stretch", "16:30" },
-    { "shutdown", "18:00" },
 };
 
 static const char *const replay_idempotent_next_none[] = {
@@ -199,7 +198,6 @@ static const fx_kv_t stretch_priority_next[] = {
     { "snack", "15:30" },
     { "lunch", "13:00" },
     { "stretch", "16:30" },
-    { "shutdown", "18:00" },
 };
 
 static const char *const stretch_priority_due[] = {
@@ -327,7 +325,7 @@ static const fixture_t FIXTURES[] = {
       .counts = replay_idempotent_counts, .n_counts = 2,
       .skipped = replay_idempotent_skipped, .n_skipped = 1,
       .missed = replay_idempotent_missed, .n_missed = 3,
-      .next = replay_idempotent_next, .n_next = 6,
+      .next = replay_idempotent_next, .n_next = 5,
       .next_epoch = NULL, .n_next_epoch = 0,
       .next_none = replay_idempotent_next_none, .n_next_none = 1,
       .due = replay_idempotent_due, .n_due = 5 },
@@ -357,7 +355,7 @@ static const fixture_t FIXTURES[] = {
       .counts = NULL, .n_counts = 0,
       .skipped = NULL, .n_skipped = 0,
       .missed = stretch_priority_missed, .n_missed = 3,
-      .next = stretch_priority_next, .n_next = 7,
+      .next = stretch_priority_next, .n_next = 6,
       .next_epoch = NULL, .n_next_epoch = 0,
       .next_none = NULL, .n_next_none = 0,
       .due = stretch_priority_due, .n_due = 5 },

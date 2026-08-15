@@ -17,16 +17,17 @@
 
 static const char *TAG = "ui";
 
-// No header bar: the grid owns all 448px. Four rows — three pairs plus the
-// full-width shutdown — at 104px with 8px gutters comes to 446.
+// No header bar: the grid owns all 448px. Six actions is three even rows,
+// so the tiles get the height back rather than leaving a gap at the bottom:
+// 3 x 140 + 2 gutters + margins = 448 exactly.
 #define TILE_W  172
-#define TILE_H  104
+#define TILE_H  140
 #define GAP       8
 #define GRID_X0   6
 #define GRID_Y0   6
 
 static const uint32_t TINT[] = {
-    0x7fd4a8, 0x6ec3e0, 0xb6a3e8, 0xe8b06a, 0xe8926a, 0xe0d16a, 0x8f9aa8,
+    0x7fd4a8, 0x6ec3e0, 0xb6a3e8, 0xe8b06a, 0xe8926a, 0xe0d16a,
 };
 
 card_t g_card;
@@ -129,9 +130,8 @@ static void build_grid(void) {
     lv_obj_clear_flag(g_grid, LV_OBJ_FLAG_SCROLLABLE);
 
     for (int i = 0; i < g_settings.n_actions; i++) {
-        const bool last = (i == g_settings.n_actions - 1);
-        const int w = last ? (TILE_W * 2 + GAP + 4) : TILE_W;
-        const int x = last ? GRID_X0 : (i % 2) * (TILE_W + GAP + 4) + GRID_X0;
+        const int w = TILE_W;
+        const int x = (i % 2) * (TILE_W + GAP + 4) + GRID_X0;
         const int y = GRID_Y0 + (i / 2) * (TILE_H + GAP);
 
         lv_obj_t *t = lv_obj_create(g_grid);

@@ -16,7 +16,7 @@
     "missed":  { "stand": 4, "water": 3, "roll": 3 },
     "next": {
       "stand": "13:45", "water": "13:30", "roll": "14:00",
-      "snack": "15:30", "stretch": "16:30", "shutdown": "18:00"
+      "snack": "15:30", "stretch": "16:30"
     },
     "nextNone": ["lunch"],
     "due": ["stretch", "snack", "stand", "water", "roll"]

@@ -38,7 +38,7 @@
   .screen.on { opacity:1; pointer-events:auto }
 
   /* ---------------------------------------------------------------- grid */
-  .grid { display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:104px; gap:8px; padding:6px }
+  .grid { display:grid; grid-template-columns:1fr 1fr; grid-auto-rows:140px; gap:8px; padding:6px }
   .tile {
     position:relative; background:var(--tile); border:2px solid var(--tint);
     border-radius:14px; overflow:hidden; padding:8px; cursor:pointer;
@@ -129,7 +129,6 @@ const ICONS = {
   snack:  '<path d="M12 8c-4-3-8 0-8 5s4 8 5.5 8 1.6-.8 2.5-.8 1 .8 2.5.8S20 18 20 13s-4-8-8-5Z"/><path d="M12 8c0-2 1-3.5 3-4"/>',
   lunch:  '<path d="M3.5 11h17a8.5 8.5 0 0 1-17 0Z"/><path d="M8 7.5c0-1.5 1-2 1-3M12 7.5c0-1.5 1-2 1-3M16 7.5c0-1.5 1-2 1-3"/>',
   stretch:'<circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.9 4.9l1.4 1.4m11.4 11.4 1.4 1.4M19.1 4.9l-1.4 1.4M6.3 17.7l-1.4 1.4"/>',
-  shutdown:'<path d="M20 13.5A8 8 0 0 1 10.5 4a7 7 0 1 0 9.5 9.5Z"/>',
 };
 const SPEAKER_ON  = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5H4Z"/><path d="M16 9.5a3.5 3.5 0 0 1 0 5"/><path d="M18.5 7a7 7 0 0 1 0 10"/></svg>';
 const SPEAKER_OFF = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5H4Z"/><path d="m16 10 5 4m0-4-5 4"/></svg>';
@@ -143,7 +142,6 @@ const ACTIONS = [
   { id:'snack',   name:'Snack',         tint:'#e8b06a', blurb:'Something small before the slump.',          target:2,  done:1, skip:0, miss:0, mins:null,due:false },
   { id:'lunch',   name:'Lunch',         tint:'#e8926a', blurb:'Away from the desk.',                        target:1,  done:0, skip:0, miss:0, mins:26,  due:false },
   { id:'stretch', name:'Stretches',     tint:'#e0d16a', blurb:'Four stretches, about three minutes.',       target:2,  done:1, skip:0, miss:0, mins:55,  due:false },
-  { id:'shutdown',name:'Shut down',     tint:'#8f9aa8', blurb:'Close the laptop. That is the day.',         target:1,  done:0, skip:0, miss:0, mins:132, due:false },
 ];
 let soundOn = true, open_ = null;
 
@@ -154,11 +152,11 @@ const dotsHTML = a => {
        : d < a.done+a.skip+a.miss ? 'miss' : 'pend'}"></i>`).join('');
 };
 const fill = a => a.mins == null ? 0
-  : Math.round(Math.min(1, 1 - a.mins / (a.id==='shutdown' ? 180 : a.id==='lunch' ? 60 : 45)) * 100);
+  : Math.round(Math.min(1, 1 - a.mins / (a.id==='lunch' ? 60 : 45)) * 100);
 
 function drawGrid() {
   document.getElementById('grid').innerHTML = ACTIONS.map((a,i) => `
-    <div class="tile ${i===6?'wide':''}" style="--tint:${a.tint}; --fill:${fill(a)}px" data-i="${i}">
+    <div class="tile" style="--tint:${a.tint}; --fill:${fill(a)}px" data-i="${i}">
       <div class="wash"></div>
       ${fill(a) > 2 ? `<div class="surface">${WAVE}</div>` : ''}
       <svg class="icon" viewBox="0 0 24 24">${ICONS[a.id]}</svg>
