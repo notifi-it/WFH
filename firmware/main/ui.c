@@ -10,6 +10,8 @@
 #include "esp_timer.h"
 #include "lvgl.h"
 
+#include "icons.h"
+
 #include "day.h"
 #include "input.h"
 
@@ -18,14 +20,20 @@ static const char *TAG = "ui";
 // No header bar: the grid owns all 448px. Six actions is three even rows,
 // so the tiles get the height back rather than leaving a gap at the bottom:
 // 3 x 140 + 2 gutters + margins = 448 exactly.
-#define TILE_W  172
-#define TILE_H  140
-#define GAP       8
-#define GRID_X0   6
-#define GRID_Y0   6
+#define TILE_W  167
+#define TILE_H  134
+#define GAP      10
+#define GRID_X0  12
+#define GRID_Y0  12
 
 static const uint32_t TINT[] = {
     0x7fd4a8, 0x6ec3e0, 0xb6a3e8, 0xe8b06a, 0xe8926a, 0xe0d16a,
+};
+
+// A8 alpha art, recoloured to the action's tint at runtime. Order matches
+// config/actions.json, which is also what TINT is indexed by.
+static const lv_image_dsc_t *ICON[] = {
+    &icon_stand, &icon_water, &icon_roll, &icon_snack, &icon_lunch, &icon_stretch,
 };
 
 card_t g_card;
@@ -36,7 +44,7 @@ static lv_obj_t *g_rows[ACTIONS_MAX], *g_checks[ACTIONS_MAX];
 
 // The popup is one screen reused for whichever tile was tapped.
 static int       g_popup_action = -1;
-static lv_obj_t *g_pop_name, *g_pop_blurb, *g_pop_state, *g_pop_sound, *g_pop_done;
+static lv_obj_t *g_pop_name, *g_pop_blurb, *g_pop_state, *g_pop_sound, *g_pop_done, *g_pop_icon;
 
 // §7.2's dot row. Four states, and skipped vs missed stay visually distinct:
 // deciding not to eat lunch and forgetting to log lunch are different facts.
@@ -60,6 +68,8 @@ static void popup_refresh(void) {
     const int a = g_popup_action;
     if (a < 0 || !g_pop_name) return;
 
+    lv_image_set_src(g_pop_icon, ICON[a]);
+    lv_obj_set_style_image_recolor(g_pop_icon, lv_color_hex(TINT[a]), 0);
     lv_label_set_text(g_pop_name, g_settings.actions[a].name);
     lv_obj_set_style_text_color(g_pop_name, lv_color_hex(TINT[a]), 0);
     lv_label_set_text(g_pop_blurb, g_settings.actions[a].blurb);
@@ -132,7 +142,7 @@ static void build_grid(void) {
 
     for (int i = 0; i < g_settings.n_actions; i++) {
         const int w = TILE_W;
-        const int x = (i % 2) * (TILE_W + GAP + 4) + GRID_X0;
+        const int x = (i % 2) * (TILE_W + GAP) + GRID_X0;
         const int y = GRID_Y0 + (i / 2) * (TILE_H + GAP);
 
         lv_obj_t *t = lv_obj_create(g_grid);
@@ -175,10 +185,12 @@ static void build_grid(void) {
         lv_obj_clear_flag(wave, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
         g_wave[i] = wave;
 
-        lv_obj_t *name = lv_label_create(t);
-        lv_label_set_text(name, g_settings.actions[i].name);
-        lv_obj_set_style_text_color(name, lv_color_hex(TINT[i]), 0);
-        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 8, 8);
+        lv_obj_t *icon = lv_image_create(t);
+        lv_image_set_src(icon, ICON[i]);
+        lv_obj_set_style_image_recolor(icon, lv_color_hex(TINT[i]), 0);
+        lv_obj_set_style_image_recolor_opa(icon, LV_OPA_COVER, 0);
+        lv_obj_align(icon, LV_ALIGN_TOP_LEFT, 8, 8);
+        lv_obj_remove_flag(icon, LV_OBJ_FLAG_CLICKABLE);
 
         for (int d = 0; d < MAX_DOTS; d++) {
             lv_obj_t *dot = lv_obj_create(t);
@@ -276,9 +288,14 @@ static void build_popup(void) {
     lv_obj_set_ext_click_area(g_pop_sound, 16);
     lv_obj_add_event_cb(g_pop_sound, on_sound_icon, LV_EVENT_CLICKED, NULL);
 
+    g_pop_icon = lv_image_create(g_popup);
+    lv_image_set_scale(g_pop_icon, 512);              // 2x: 34px art at 68px
+    lv_obj_set_style_image_recolor_opa(g_pop_icon, LV_OPA_COVER, 0);
+    lv_obj_align(g_pop_icon, LV_ALIGN_TOP_MID, 0, 76);
+
     g_pop_name = lv_label_create(g_popup);
     lv_obj_set_style_text_font(g_pop_name, &lv_font_montserrat_28, 0);
-    lv_obj_align(g_pop_name, LV_ALIGN_TOP_LEFT, 16, 76);
+    lv_obj_align(g_pop_name, LV_ALIGN_TOP_MID, 0, 152);
 
     g_pop_blurb = lv_label_create(g_popup);
     lv_obj_set_width(g_pop_blurb, 336);
@@ -339,12 +356,12 @@ static void dot_set(int a, int d, dot_state_t s, uint32_t tint) {
         break;
     case DOT_MISS:                                     // hollow ring
         lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
-        lv_obj_set_style_border_color(o, lv_color_hex(0x6e7681), 0);
+        lv_obj_set_style_border_color(o, lv_color_hex(0x8b949e), 0);
         lv_obj_set_style_border_width(o, 1, 0);
         break;
     default:                                           // pending: dark solid
         lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
-        lv_obj_set_style_bg_color(o, lv_color_hex(0x30363d), 0);
+        lv_obj_set_style_bg_color(o, lv_color_hex(0x4a525c), 0);
         lv_obj_set_style_border_width(o, 0, 0);
         break;
     }
@@ -364,7 +381,7 @@ static void dots_refresh(int a) {
         const int32_t avail = lv_obj_get_content_width(g_tile[a]) - 16 - 56;
         int pitch = n > 0 ? (int)(avail / n) : 11;
         if (pitch > 11) pitch = 11;
-        const int size = (pitch - 3) < 4 ? 4 : (pitch - 3);
+        const int size = (pitch - 2) < 5 ? 5 : (pitch - 2);
         for (int d = 0; d < n; d++) {
             lv_obj_set_size(g_dot[a][d], size, size);
             lv_obj_set_style_radius(g_dot[a][d], size, 0);
