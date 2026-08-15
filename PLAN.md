@@ -10,7 +10,9 @@ A square-format habit tracker that prompts seven actions on independent timers d
 
 **A standalone desk object with a debug port. Nothing else.**
 
-Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.8 (368x448, ESP32-S3R8, 8MB PSRAM, 16MB flash, QMI8658 IMU, PCF85063 RTC, AXP2101 PMIC, speaker, battery).
+Hardware: Waveshare ESP32-S3-Touch-AMOLED-1.8 (368x448, ESP32-S3R8, 8MB PSRAM, 16MB flash, QMI8658 IMU, PCF85063 RTC, AXP2101 PMIC, ES8311 codec + NS4150B amp into an onboard 8Ω/1W speaker, TCA9554 I/O expander, battery connector — no cell included).
+
+**The board ships in two revisions and the difference is not cosmetic:** V1 pairs the SH8601 display controller with FT3168 touch; V2 (shipping from May 30, 2026) pairs CO5300 with CST820. Display bring-up and the touch driver both change with it. Check the label on the back before writing a line of driver code; everything schematic-derived in this plan (§7.4, §9.1, §10) was verified against V1.
 
 The board owns everything: the schedule, the clock, the event log, the prompting, the sound, and the only screen. There is no companion app, no browser client, no second way to log anything.
 
@@ -40,7 +42,7 @@ The board sits on the desk and prompts the person sitting at it. It does not cha
 | Stretches | 11:30, 16:30 | 2 | yellow `#e0d16a` | guided, 4 steps |
 | Shut down | 18:00 | 1 | grey `#8f9aa8` | single tap |
 
-Working hours 09:00–18:00. No prompts outside the window. Timers reset at 09:00 the next day.
+Working hours 09:00–18:00. No prompts outside the window, save a 30-minute grace past `workEnd` that exists so the 18:00 shut-down card can be raised and answered (§5.2). Timers reset at 09:00 the next day.
 
 **Stretch sequence:** chin tucks (30s), doorway pec stretch (40s), cat-cow (40s), hip flexor stretch (50s).
 
@@ -133,7 +135,9 @@ Two things are facts. Everything else is a view over them.
 ```
 
 ```ts
-// web/src/state/types.ts — mirrored by log_event_t / day_log_t in firmware
+// Shapes in TypeScript for readability only — the one implementation is C
+// (log_event_t / day_log_t / derive, §3.3). A future client codes against
+// these through GET /state (§8.2); no web/ directory exists now.
 export type EventKind = 'done' | 'skip';        // no 'miss' — see above
 
 export interface LogEvent {
@@ -144,7 +148,10 @@ export interface LogEvent {
   slot: number;        // epoch seconds — which slot this answers; dedupe key
 }
 
-/** Everything persisted for one day. Facts only. */
+/** One day as the board tracks it. `events` is the persisted part (§3.4);
+ *  `snoozedUntil` is RAM-only — the schema has no row for it, deliberately.
+ *  A reboot mid-snooze forgets the snooze and the card just comes back,
+ *  which is the right failure for a 15-minute deferral. */
 export interface DayLog {
   version: 3;
   date: string;                                   // YYYY-MM-DD, local
@@ -200,9 +207,12 @@ export function derive(log: DayLog, now: number, s: Settings, day = new Date()):
       } else if (ev?.kind === 'skip') {
         view.skipped[def.id] = (view.skipped[def.id] ?? 0) + 1;
       } else if (slot <= now) {
-        // Unanswered and in the past. Missed, full stop — see §3.1.
-        view.missed[def.id] = (view.missed[def.id] ?? 0) + 1;
-        if (isDueNow(slot, now, log.snoozedUntil[def.id])) view.due.push(def.id);
+        // Unanswered and in the past: due while its window is open, missed
+        // once it closes. A slot's window runs from its time until the
+        // action's next slot (or workEnd + the §5.2 grace, for the last
+        // one); snooze defers due-ness within the window.
+        if (isDueNow(def, slot, now, log.snoozedUntil[def.id])) view.due.push(def.id);
+        else view.missed[def.id] = (view.missed[def.id] ?? 0) + 1;
       } else {
         view.next[def.id] = slot;          // first future slot; stop here
         break;
@@ -219,6 +229,8 @@ export function derive(log: DayLog, now: number, s: Settings, day = new Date()):
 ```
 
 The subtlety is `anchor`. §5.3's rule — an interval action done early resets its timer from the tap — means the slot grid for `stand` is not a fixed lattice; it bends every time you get ahead. Folding the anchor forward during the walk reproduces exactly the sequence the live scheduler produced, which is what makes the derived view agree with what the user actually saw on the board.
+
+`isDueNow` is §3.1's rule made precise: *unanswered and in the past* splits into *due* (window still open) and *missed* (window closed). Without the split, a prompt would count as a miss the second it fired — the hollow ring appearing while the card is still asking — and §9's "goes quiet when the next slot arrives" would contradict the dots. The window needs no storage; it falls out of the same slot walk.
 
 ### 3.3 `derive` runs once, on the board
 
@@ -259,7 +271,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 ```
 
-**Opening it.** The ESP32 port needs a VFS backed by a filesystem partition; LittleFS is the better choice over FATFS here for its wear levelling and its tolerance of unclean shutdowns, which a battery-powered device will produce.
+**Opening it.** The ESP32 port (siara-cc's `esp32-idf-sqlite3`) needs a VFS backed by a filesystem partition; LittleFS is the better choice over FATFS here for its wear levelling and its tolerance of unclean shutdowns, which a battery-powered device will produce.
 
 ```c
 // firmware/main/store.c
@@ -278,7 +290,16 @@ esp_err_t store_open(void) {
 
     // WAL keeps a power cut mid-write from corrupting the database: the
     // last committed transaction survives and the partial one is discarded.
-    sqlite3_exec(g_db, "PRAGMA journal_mode=WAL;",   NULL, NULL, NULL);
+    //
+    // Two lines here are load-bearing. The port's VFS has no shared-memory
+    // methods (io_methods version 1), and SQLite only permits WAL without
+    // shared memory when locking_mode=EXCLUSIVE is set *before* the first
+    // WAL access (sqlite.org/wal.html) — fine, this is the only connection
+    // there will ever be. And a journal_mode pragma that cannot switch does
+    // not error: it silently leaves you on DELETE, so check what came back.
+    sqlite3_exec(g_db, "PRAGMA locking_mode=EXCLUSIVE;", NULL, NULL, NULL);
+    const char *mode = pragma_text(g_db, "PRAGMA journal_mode=WAL;");
+    if (strcasecmp(mode, "wal") != 0) ESP_LOGW(TAG, "no WAL, running on %s", mode);
     sqlite3_exec(g_db, "PRAGMA synchronous=FULL;",   NULL, NULL, NULL);
     sqlite3_exec(g_db, "PRAGMA foreign_keys=ON;",    NULL, NULL, NULL);
     sqlite3_exec(g_db, SCHEMA_SQL, NULL, NULL, NULL);   // CREATE IF NOT EXISTS
@@ -344,7 +365,7 @@ void store_load_day(const char *day, day_log_t *out) {
 DELETE FROM events WHERE day < date('now', 'localtime', '-400 days');
 ```
 
-400 days rather than 14, because the cost is negligible: roughly 30 events/day × ~80 bytes/row (SQLite row overhead plus the text columns) is ~2.4KB/day, so 400 days is under 1MB against 16MB of flash. The number is "basically free," chosen to set up the historical queries in §13 without a later retention change, not because 400 is meaningful in itself.
+400 days rather than 14, because the cost is negligible: roughly 30 events/day × ~100 bytes/row (a 36-char uuid, the other text columns, SQLite row overhead) is ~3KB/day, so 400 days is ~1.2MB against 16MB of flash. The number is "basically free," chosen to set up the historical queries in §13 without a later retention change, not because 400 is meaningful in itself.
 
 ## 4. Firmware architecture
 
@@ -453,7 +474,12 @@ static void scheduler_task(void *arg) {
             day_init(&g_day, now);
         }
 
-        if (in_working_hours(now, &g_settings)) {
+        // Prompt window, not working hours: workStart ≤ now < workEnd + 30min.
+        // Slots stop generating at workEnd (§5.1), but the 18:00 shutdown slot
+        // *is* workEnd — gate on the hours alone and its card either never
+        // syncs or lives for exactly one tick. The grace lets that last card
+        // be raised and answered; it can create no new slots.
+        if (in_prompt_window(now, &g_settings)) {
             day_view_t v;
             derive(&g_day, now, &g_settings, &v);
             card_sync(v.due, v.n_due, now);      // §6 — reconciles the checklist card
@@ -561,7 +587,7 @@ void card_dismiss(void) {
 
 ## 7. Board UI
 
-368x448 AMOLED, LVGL. A 368x368 square carries the grid; the remaining 80px is a header with the clock, the date, a battery pip and the sound icon.
+368x448 AMOLED, LVGL — pin the major version in `idf_component.yml`; v9 renamed `lv_btn_*`/`lv_scr_*` to `lv_button_*`/`lv_screen_*`, and the snippets here use the v8 names. A 368x368 square carries the grid; the remaining 80px is a header with the clock, the date, a battery pip and the sound icon.
 
 ```
 ┌──────────────────────────────────────────┐
@@ -600,7 +626,7 @@ Tapping any tile logs that action immediately with no prompt — the "I just dra
 |---|---|---|
 | Done | filled, action tint | logged |
 | Skipped | mid-grey solid | deliberately skipped |
-| Missed | hollow ring | slot passed with no response |
+| Missed | hollow ring | due window closed with no response (§3.2) |
 | Pending | dark solid | still to come |
 
 Skipped and missed are visually distinct because deciding not to eat lunch and forgetting to log lunch are different facts about the day.
@@ -730,7 +756,7 @@ static void on_tile_cb(lv_event_t *e) {
 | Button | Read via | Notes |
 |---|---|---|
 | **BOOT** | `GPIO0`, active low | Free for us at runtime. Strapping pin: held at power-on it enters download mode. |
-| **PWR** | `EXIO4` on the I/O expander | 6s hold is a hardware power-off in the PMIC. Not a native GPIO. |
+| **PWR** | `EXIO4` on the I/O expander | Wired to AXP2101 `PWRON`, mirrored onto `EXIO4` through a FET. Long-press power-off belongs to the PMIC (default ~6s, register-set). Not a native GPIO. |
 
 **Use BOOT as the user key.** PWR is disqualified on two counts: it is behind an I²C expander rather than a native pin, so it cannot serve as a deep-sleep wake source and cannot be polled without an I²C transaction; and its long-press is owned by the PMIC as a hardware power-off, so the 6s gesture is not ours to redefine.
 
@@ -743,7 +769,8 @@ One press logs Done for the single highest-priority due action, which is what yo
 ```c
 // firmware/main/key.c
 #define KEY_GPIO        GPIO_NUM_0     // BOOT. The only usable key — see above.
-#define DEBOUNCE_US     250000         // 250ms
+#define DEBOUNCE_US     30000          // 30ms: a real tap runs ~50–150ms, so a
+                                       // longer floor would eat quick presses
 #define LONG_PRESS_US   800000         // 800ms
 
 static void key_task(void *arg) {
@@ -801,17 +828,21 @@ void input_toggle_sound(void) {
 
 The wake-then-answer split still applies to the short press: a single tap that both lights the panel and logs a completion means every accidental brush marks water as drunk. First tap wakes, second commits. Acting on *release* rather than press is what lets one button carry both gestures.
 
-Confirm the touch controller part against the schematic for your board revision — the AMOLED boards have changed touch parts between revisions — but the two-button arrangement above is per Waveshare's documentation for this model.
+The table above is verified against the V1 schematic — Key1 → `GPIO0` with a 10K pull-up, Key3 → `PWRON` with the FET mirror onto `EXIO4`. V2 swaps the display and touch parts (CO5300, CST820 — §1); re-check its schematic before assuming the buttons carried over unchanged.
 
 **IMU tap (optional, default off).** The QMI8658 has tap detection, so a knock on the desk beside the board could answer the current prompt without reaching for it — genuinely nice for "stand break", since you are already moving.
 
 ```c
-static void imu_tap_isr(void *arg) {
+// No ISR on this board: QMI8658 INT1 lands on the expander (EXIO6), and the
+// expander's own INT line is not routed to the ESP — so tap detection is an
+// I2C poll of the QMI's tap-status register, piggybacked on the key task's
+// 50Hz loop.
+static void imu_poll_tap(void) {
     // Only ever answers something already on the card. A tap must never
     // be able to log something the user was not being asked about — the
     // false-positive rate on desk knocks is far too high for that.
     if (g_card_len == 0 || !g_settings.imu_tap) return;
-    xQueueSendFromISR(g_input_q, &(input_msg_t){ .kind = INPUT_TAP }, NULL);
+    if (qmi8658_tap_detected()) input_done(g_card[0].action);
 }
 ```
 
@@ -975,9 +1006,9 @@ void feedback_play(cue_t cue) {
 
 ### 9.1 Sound
 
-The speaker is driven over I2S. Rather than shipping audio files, synthesise the tones — a sine with a short attack and an exponential decay, which is all these cues are.
+The chain is I2S → ES8311 codec → NS4150B amp → the onboard 8Ω/1W speaker. Rather than shipping audio files, synthesise the tones — a sine with a short attack and an exponential decay, which is all these cues are.
 
-**Check which amplifier and pin mapping your board revision uses** before wiring this up; the ESP32-S3 AMOLED boards have shipped with more than one audio arrangement.
+Pins, from the V1 schematic: MCLK `GPIO16`, BCLK `GPIO9`, LRCK `GPIO45`, data out `GPIO8` (the mic comes back on `GPIO10`, unused here). The codec needs an I2C init before it makes a sound — use `esp_codec_dev` rather than hand-rolling ES8311 registers — and the amp is gated by `PA_CTRL` on `GPIO46`: high to play, low in Idle so a silent board is actually silent.
 
 ```c
 // firmware/main/audio.c
@@ -1031,11 +1062,14 @@ Two things worth keeping: the queue means `feedback_play` never blocks a touch h
 **Escalate rather than repeat.** If a prompt goes unanswered for two minutes, re-cue once at higher volume. If it is still unanswered when the next slot arrives it becomes a derived miss and the board goes quiet. It must never nag in a loop.
 
 ```c
-// In the scheduler tick.
-if (g_card_len > 0 && now - g_card_raised_at == 120) {
-    audio_set_volume(g_settings.volume + 15);
-    feedback_play(CUE_BLOOM);
-    audio_set_volume(g_settings.volume);
+// In the scheduler tick. One-shot per card, `>=` not `==` so one skipped
+// tick cannot skip the escalation. The boost rides inside the queued
+// message: audio_play is asynchronous, so bumping a global volume and
+// restoring it around the call would race the audio task and mostly play
+// the re-cue at normal volume anyway.
+if (g_card_len > 0 && !g_card_escalated && now - g_card_raised_at >= 120) {
+    g_card_escalated = true;               // cleared when the card empties
+    feedback_play_boost(CUE_BLOOM, 15);    // +15 volume, clamped to 100
 }
 ```
 
@@ -1053,7 +1087,7 @@ So **screen-on time is the budget, not uptime** — which suits an app that is i
 |---|---|---|---|---|---|
 | Active | prompt firing, or touch within 20s | — | on | on | yes |
 | Idle | no touch for 20s, inside working hours | any touch or key press | off | modem-sleep | yes, if awake |
-| Dormant | outside working hours | RTC timer (next `workStart`) or key press | off | off | no |
+| Dormant | outside the prompt window (§5.2) | RTC timer (next `workStart`) or key press | off | off | no |
 
 **Idle is the important one**, and it got cheaper when the client went away. Nothing is polling the board, so the radio does not need to stay responsive — it only has to wake for NTP occasionally. Screen off is what matters, since the panel is the actual cost. A touch or key press takes it straight back to Active, same path as the wake sources listed for Dormant below.
 
@@ -1070,11 +1104,14 @@ esp_wifi_set_ps(WIFI_PS_MAX_MODEM);   // wake only on DTIM beacons
 **Deep sleep is still the wrong tool for Idle**, but for a plainer reason than before: it loses RAM state and costs a full boot, and Idle can happen dozens of times an hour. Use it only for Dormant, where the next event is hours away.
 
 ```c
-static void enter_dormant(time_t work_start_tomorrow) {
-    uint64_t us = (uint64_t)(work_start_tomorrow - time(NULL)) * 1000000ULL;
-    esp_sleep_enable_timer_wakeup(us);
-    // BOOT/GPIO0 is RTC-capable, so it can wake us. PWR cannot — it is behind
-    // the I/O expander, which is unpowered in deep sleep. §7.4
+static void enter_dormant(time_t wake_at) {
+    if (wake_at > time(NULL)) {           // guard: a past/zero wake_at would
+        uint64_t us = (uint64_t)(wake_at - time(NULL)) * 1000000ULL;
+        esp_sleep_enable_timer_wakeup(us);// underflow into a garbage
+    }                                     // multi-year timer
+    // BOOT/GPIO0 is RTC-capable, so it can wake us (ext1; the _io variant on
+    // newer IDF). PWR cannot — it reaches the ESP only through the expander,
+    // which has no line to an RTC GPIO.
     esp_sleep_enable_ext1_wakeup(BIT64(KEY_GPIO), ESP_EXT1_WAKEUP_ANY_LOW);
     sqlite3_close(g_db);                          // checkpoint WAL before sleep
     esp_deep_sleep_start();
@@ -1100,14 +1137,16 @@ static void on_power_event(axp2101_event_t ev) {
         ui_show_battery_warning();                 // on the board's own screen
         break;
     case AXP2101_BATT_CRITICAL:                   // ~5%
-        sqlite3_close(g_db);                       // checkpoint WAL before sleep
-        enter_dormant(0);                         // wake on USB only
+        sqlite3_close(g_db);                      // checkpoint WAL first
+        pmic_power_off();                         // AXP2101 register power-off
         break;
     }
 }
 ```
 
-Closing the database connection on the critical interrupt checkpoints the WAL, so the next boot opens a clean database rather than replaying a journal.
+Closing the database connection on the critical event checkpoints the WAL, so the next boot opens a clean database rather than replaying a journal.
+
+Two wiring facts (V1 schematic) shape this code. First, `on_power_event` is fed by an I2C poll of the AXP2101 status registers on the 1 Hz tick, not by a GPIO interrupt — the PMIC's IRQ pin lands on the expander (`EXIO5`) and the expander's INT line goes nowhere. Second, that same fact is why critical-battery is a **PMIC power-off, not deep sleep**: nothing can wake a deep-sleeping ESP when USB power returns, so a board that deep-slept at 5% would sit dead-looking on a charger until someone pressed the key. A register power-off cuts the rails for microamps, and the AXP2101 powers back on from exactly the right triggers — a PWR press or USB insertion (confirm the power-on-source config at bring-up).
 
 Battery goes in `/state` (§8) so it is answerable over `curl`, and on the header pip so it is answerable at a glance:
 
@@ -1126,7 +1165,7 @@ cJSON_AddBoolToObject(root,   "onBattery", g_on_battery);
 Firmware first, because it is the product and it is the long pole. Each step should end somewhere you can leave it.
 
 0. **The design loop** — `design/` renders board screens at 368×448 and screenshots them headlessly (see `design/README.md`). Needs no hardware and no ESP-IDF, so design iteration is never blocked behind a toolchain. Settle what the screens look like here; §7 transcribes the result.
-1. **Board bring-up** — ESP-IDF project, display, touch, LVGL hello-world, WiFi, NTP-set RTC. Confirms the hardware and the toolchain before any product logic exists.
+1. **Board bring-up** — ESP-IDF project, display, touch, LVGL hello-world, WiFi, NTP-set RTC. Confirms the hardware and the toolchain before any product logic exists. First act: read the revision label (§1) and run the vendor demo that matches it — V1 and V2 take different display and touch drivers.
 2. **Config generation** — `actions.json` → `actions.g.h`, wired into the build with the CI diff check.
 3. **Storage** — LittleFS partition, SQLite, schema, `store_add_event` / `store_load_day`. Verifiable on its own with a serial console before any UI exists.
 4. **`derive` and `day_apply_event`** — the walk, the anchor rule, plus the fixtures in §11.1. **This is the step to get right**; everything else is presentation.
@@ -1178,7 +1217,7 @@ Handled in the tick (§5.2), not on boot: the board runs for weeks at a time, so
 - **No client, by choice.** No phone app, no browser page, no remote logging. If you are not at the board, nothing happens. §1 has the reasoning; §8.2 has the exit if that stops being true.
 - **No reach away from the desk.** Deliberate. If you are not at the board, it does not prompt you, and it does not tell your phone.
 - **A board that was off accumulates real misses.** Simplified from an earlier draft that tracked presence explicitly (§3.1) — a board that slept, ran flat, or was unplugged for part of the day will show every slot it missed during that gap as missed when it returns, the same as if it had simply failed to prompt. Accepted for the simplicity; §10 recommends USB-C precisely to keep this rare.
-- **Clock.** NTP at boot when WiFi is available, PCF85063 otherwise. A board that has never seen NTP and has a flat backup cell will have a wrong date, and the day key will be wrong with it. Show the date in the header so this is visible rather than silent.
+- **Clock.** NTP at boot when WiFi is available, PCF85063 otherwise. The RTC runs off the AXP2101's RTC rail with the main battery behind it — the dedicated backup-cell pads ship empty — so time survives reboots and unplugs while any battery is attached, and is lost when all power is removed. A board that then boots without ever seeing NTP has a wrong date, and the day key is wrong with it. Show the date in the header so this is visible rather than silent.
 
 ---
 
@@ -1258,11 +1297,13 @@ There is currently no answer to "why did it crash at 3am" beyond a serial cable 
 
 ```c
 // firmware/main/devlog.c
-// A fixed-size ring in LittleFS. Old lines are overwritten, not deleted —
-// there is no unbounded growth to prune, and no SQLite involvement: this is
-// diagnostic scratch, not data the product depends on being correct.
-#define DEVLOG_PATH      "/fs/devlog.txt"
-#define DEVLOG_MAX_BYTES (256 * 1024)          // ~24h of verbose logging, comfortably
+// Two files, append + rotate — not an in-place byte ring. LittleFS is
+// copy-on-write: appends are what it is good at, and rewriting the middle
+// of a file (which is what a ring does all day) costs block copies and
+// flash wear for nothing. No SQLite involvement: this is diagnostic
+// scratch, not data the product depends on being correct.
+#define DEVLOG_PATH      "/fs/devlog.0"        // current; renamed to .1 when full
+#define DEVLOG_ROTATE    (128 * 1024)          // ×2 files ≈ 24h of verbose logging
 
 void devlog_write(const char *tag, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
@@ -1271,7 +1312,7 @@ void devlog_write(const char *tag, const char *fmt, ...) {
     n += vsnprintf(line + n, sizeof(line) - n, fmt, ap);
     va_end(ap);
 
-    ring_append(DEVLOG_PATH, DEVLOG_MAX_BYTES, line, n);   // wraps at the size cap
+    rotate_append(DEVLOG_PATH, DEVLOG_ROTATE, line, n);    // .0 → .1 at the cap
     ESP_LOGI(tag, "%s", line);                             // still visible over serial
 }
 ```
@@ -1280,8 +1321,8 @@ void devlog_write(const char *tag, const char *fmt, ...) {
 // GET /logs — pullable over curl without unplugging anything.
 static esp_err_t logs_get(httpd_req_t *req) {
     httpd_resp_set_type(req, "text/plain");
-    return ring_send(DEVLOG_PATH, req);        // streams the file as-is
+    return rotate_send(req);                   // streams devlog.1 then devlog.0
 }
 ```
 
-Every call site that currently does `ESP_LOGx(...)` on something worth remembering becomes `devlog_write(...)`, which does both — visible on serial live, and pullable over `curl` afterward for the 3am reboot nobody watched. The ring is capped and self-overwriting specifically so this can be sprinkled liberally without a slow flash-fill-up turning into its own bug.
+Every call site that currently does `ESP_LOGx(...)` on something worth remembering becomes `devlog_write(...)`, which does both — visible on serial live, and pullable over `curl` afterward for the 3am reboot nobody watched. Rotation is capped and automatic specifically so this can be sprinkled liberally without a slow flash-fill-up turning into its own bug.
