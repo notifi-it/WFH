@@ -32,3 +32,4 @@ CONFIG_LV_USE_PERF_MONITOR=y
 # washes stretched across the panel — while every log line still said the
 # display was up. Framebuffer corruption reports nothing.
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_LV_USE_SNAPSHOT=y

@@ -7,6 +7,7 @@
 #include <sys/time.h>
 
 #include "bsp/esp-bsp.h"
+#include "esp_heap_caps.h"
 #include "esp_io_expander.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -24,9 +25,57 @@
 #include "store.h"
 #include "ui.h"
 
+
+
 static const char *TAG = "wfh";
 
 #define ESCALATE_AFTER_S 120        // §9: re-cue once, louder, then stay quiet
+
+// Framebuffer dump. A display can be wrong in two very different places —
+// LVGL drew it wrong, or the panel received it wrong — and from the outside
+// both look identical. Snapshotting what LVGL rendered splits those cases
+// without anyone photographing a screen.
+#ifdef CONFIG_WFH_DUMP_FRAMEBUFFER
+static void dump_screen(void) {
+    // LVGL's own pool is far smaller than a frame, so the buffer comes from
+    // PSRAM and lv_snapshot renders into it rather than allocating its own.
+    const int32_t w = lv_display_get_horizontal_resolution(NULL);
+    const int32_t h = lv_display_get_vertical_resolution(NULL);
+    const uint32_t stride = lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
+    uint8_t *mem = heap_caps_malloc(stride * h, MALLOC_CAP_SPIRAM);
+    if (!mem) { ESP_LOGE(TAG, "no PSRAM for snapshot"); return; }
+
+    lv_draw_buf_t buf;
+    lv_draw_buf_init(&buf, w, h, LV_COLOR_FORMAT_RGB565, stride, mem, stride * h);
+
+    lv_result_t ok = LV_RESULT_INVALID;
+    if (bsp_display_lock(2000)) {
+        ok = lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565, &buf);
+        bsp_display_unlock();
+    }
+    if (ok != LV_RESULT_OK) { ESP_LOGE(TAG, "snapshot failed"); free(mem); return; }
+    lv_draw_buf_t *snap = &buf;
+
+    static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const uint8_t *p = snap->data;
+    const size_t n = (size_t)snap->header.stride * snap->header.h;
+
+    printf("\n<<<FB %d %d %d>>>\n", (int)snap->header.w, (int)snap->header.h,
+           (int)snap->header.stride);
+    for (size_t i = 0; i < n; i += 3) {
+        const uint32_t v = (uint32_t)p[i] << 16 |
+                           (uint32_t)(i + 1 < n ? p[i+1] : 0) << 8 |
+                           (uint32_t)(i + 2 < n ? p[i+2] : 0);
+        char q[4] = { B64[v >> 18 & 63], B64[v >> 12 & 63],
+                      i + 1 < n ? B64[v >> 6 & 63] : '=', i + 2 < n ? B64[v & 63] : '=' };
+        fwrite(q, 1, 4, stdout);
+        if ((i / 3) % 16 == 15) putchar('\n');
+    }
+    printf("\n<<<END>>>\n");
+    fflush(stdout);
+    free(mem);
+}
+#endif
 
 /** The V1 BSP creates the I/O expander and never drives it, so the panel has
  *  no VCI and both controllers sit in reset. Nothing reports this — every SPI
@@ -136,4 +185,9 @@ void app_main(void) {
              g_settings.n_actions, g_day.events_len, g_view.n_due);
 
     xTaskCreate(tick_task, "tick", 6144, NULL, 5, NULL);
+
+#ifdef CONFIG_WFH_DUMP_FRAMEBUFFER
+    vTaskDelay(pdMS_TO_TICKS(2500));
+    dump_screen();
+#endif
 }
