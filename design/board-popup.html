@@ -9,13 +9,21 @@
   only get here on purpose.
 -->
 <style id="fonts">
-  /* Two candidates, switchable with ?font=. Both are OFL and convert to LVGL
-     with lv_font_conv, so the screen and the firmware can share a typeface
-     rather than the design drifting from what the board can actually render. */
+  /* Candidates, switchable with ?font=. All OFL, all convertible with
+     lv_font_conv, which is why the shortlist looks like this — the board
+     has to be able to render whatever wins. */
   @font-face { font-family: "Space Grotesk"; src: url("fonts/SpaceGrotesk-500.woff2") format("woff2"); font-weight: 500; }
   @font-face { font-family: "Space Grotesk"; src: url("fonts/SpaceGrotesk-700.woff2") format("woff2"); font-weight: 700; }
   @font-face { font-family: "Manrope"; src: url("fonts/Manrope-500.woff2") format("woff2"); font-weight: 500; }
   @font-face { font-family: "Manrope"; src: url("fonts/Manrope-700.woff2") format("woff2"); font-weight: 700; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-700.woff2") format("woff2"); font-weight: 700; }
+  @font-face { font-family: "Outfit"; src: url("fonts/Outfit-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Outfit"; src: url("fonts/Outfit-700.woff2") format("woff2"); font-weight: 700; }
+  @font-face { font-family: "Plus Jakarta Sans"; src: url("fonts/PlusJakartaSans-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Plus Jakarta Sans"; src: url("fonts/PlusJakartaSans-700.woff2") format("woff2"); font-weight: 700; }
+  @font-face { font-family: "Sora"; src: url("fonts/Sora-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Sora"; src: url("fonts/Sora-700.woff2") format("woff2"); font-weight: 700; }
 </style>
 <script>
   const f = new URLSearchParams(location.search).get('font') || 'Space Grotesk';
@@ -92,15 +100,15 @@
     display: block; width: 100%; border: 0; border-radius: 16px;
     font: inherit; color: var(--bg); cursor: pointer;
   }
-  .primary {
-    height: 84px; background: var(--tint);
-    font-size: 22px; font-weight: 600; letter-spacing: -.01em;
+  /* Same size, different weight of presence. Done is filled and Skip is
+     outlined, so the hierarchy is carried by colour rather than by making
+     one target harder to hit than the other. */
+  .primary, .secondary {
+    height: 66px; font-size: 19px; font-weight: 600; letter-spacing: -.01em;
   }
-  .secondary {
-    height: 52px; margin-top: 10px; background: transparent;
-    color: var(--muted); font-size: 15px;
-    border: 1px solid var(--pending);
-  }
+  .primary   { background: var(--tint); }
+  .secondary { margin-top: 10px; background: transparent; color: var(--muted);
+               border: 1px solid var(--pending); }
 </style>
 
 <body style="--tint:#6ec3e0">
