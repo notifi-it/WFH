@@ -10,8 +10,6 @@
 #include "esp_timer.h"
 #include "lvgl.h"
 
-#include "fonts.h"
-
 #include "day.h"
 #include "input.h"
 
@@ -128,7 +126,7 @@ static void x_button(lv_obj_t *parent, lv_event_cb_t on_close) {
 
 static void build_grid(void) {
     g_grid = lv_obj_create(NULL);
-    lv_obj_set_style_text_font(g_grid, &geist_14, 0);
+    lv_obj_set_style_text_font(g_grid, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(g_grid, lv_color_hex(0x0d1117), 0);
     lv_obj_clear_flag(g_grid, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -192,7 +190,7 @@ static void build_grid(void) {
         }
 
         g_cd[i] = lv_label_create(t);
-        lv_obj_set_style_text_font(g_cd[i], &geist_22, 0);
+        lv_obj_set_style_text_font(g_cd[i], &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_color(g_cd[i], lv_color_hex(0xe6edf3), 0);
         lv_obj_align(g_cd[i], LV_ALIGN_BOTTOM_RIGHT, -8, -8);
     }
@@ -202,13 +200,13 @@ static void build_grid(void) {
 
 static void build_card(void) {
     g_card_scr = lv_obj_create(NULL);
-    lv_obj_set_style_text_font(g_card_scr, &geist_14, 0);
+    lv_obj_set_style_text_font(g_card_scr, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(g_card_scr, lv_color_hex(0x0d1117), 0);
     lv_obj_clear_flag(g_card_scr, LV_OBJ_FLAG_SCROLLABLE);
 
     lv_obj_t *title = lv_label_create(g_card_scr);
     lv_label_set_text(title, "Due now");
-    lv_obj_set_style_text_font(title, &geist_bold_30, 0);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
     lv_obj_set_style_text_color(title, lv_color_hex(0xe6edf3), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 16, 20);
 
@@ -264,7 +262,7 @@ static void build_card(void) {
 
 static void build_popup(void) {
     g_popup = lv_obj_create(NULL);
-    lv_obj_set_style_text_font(g_popup, &geist_14, 0);
+    lv_obj_set_style_text_font(g_popup, &lv_font_montserrat_14, 0);
     lv_obj_set_style_bg_color(g_popup, lv_color_hex(0x0d1117), 0);
     lv_obj_clear_flag(g_popup, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -279,7 +277,7 @@ static void build_popup(void) {
     lv_obj_add_event_cb(g_pop_sound, on_sound_icon, LV_EVENT_CLICKED, NULL);
 
     g_pop_name = lv_label_create(g_popup);
-    lv_obj_set_style_text_font(g_pop_name, &geist_bold_30, 0);
+    lv_obj_set_style_text_font(g_pop_name, &lv_font_montserrat_28, 0);
     lv_obj_align(g_pop_name, LV_ALIGN_TOP_LEFT, 16, 76);
 
     g_pop_blurb = lv_label_create(g_popup);
@@ -297,7 +295,7 @@ static void build_popup(void) {
     lv_obj_align(g_pop_done, LV_ALIGN_BOTTOM_MID, 0, -92);
     lv_obj_t *dlab = lv_label_create(g_pop_done);
     lv_label_set_text(dlab, "Done");
-    lv_obj_set_style_text_font(dlab, &geist_18, 0);
+    lv_obj_set_style_text_font(dlab, &lv_font_montserrat_16, 0);
     lv_obj_set_style_text_color(dlab, lv_color_hex(0x0d1117), 0);
     lv_obj_center(dlab);
     lv_obj_add_event_cb(g_pop_done, on_pop_done, LV_EVENT_CLICKED, NULL);
@@ -307,7 +305,7 @@ static void build_popup(void) {
     lv_obj_align(skip, LV_ALIGN_BOTTOM_MID, 0, -20);
     lv_obj_set_style_bg_color(skip, lv_color_hex(0x21262d), 0);
     lv_obj_t *slab = lv_label_create(skip);
-    lv_obj_set_style_text_font(slab, &geist_18, 0);
+    lv_obj_set_style_text_font(slab, &lv_font_montserrat_16, 0);
     lv_label_set_text(slab, "Skip");
     lv_obj_center(slab);
     lv_obj_add_event_cb(skip, on_pop_skip, LV_EVENT_CLICKED, NULL);
