@@ -116,6 +116,9 @@ static void x_button(lv_obj_t *parent, lv_event_cb_t on_close) {
     lv_obj_set_style_bg_opa(x, LV_OPA_TRANSP, 0);
     lv_obj_set_style_shadow_width(x, 0, 0);
     lv_obj_t *l = lv_label_create(x);
+    // Geist is ASCII-only, so LV_SYMBOL_* glyphs are not in it. Symbol
+    // labels keep LVGL's bundled font; everything else is Geist.
+    lv_obj_set_style_text_font(l, &lv_font_montserrat_14, 0);
     lv_label_set_text(l, LV_SYMBOL_CLOSE);
     lv_obj_center(l);
     lv_obj_add_event_cb(x, on_close, LV_EVENT_CLICKED, NULL);
@@ -269,7 +272,7 @@ static void build_popup(void) {
     // holds — the icon *is* the state — it just needs a home, and the popup
     // is the one screen you always pass through to answer anything.
     g_pop_sound = lv_label_create(g_popup);
-    lv_obj_set_style_text_font(g_pop_sound, &geist_22, 0);
+    lv_obj_set_style_text_font(g_pop_sound, &lv_font_montserrat_14, 0);
     lv_obj_align(g_pop_sound, LV_ALIGN_TOP_LEFT, 16, 18);
     lv_obj_add_flag(g_pop_sound, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_ext_click_area(g_pop_sound, 16);
@@ -435,10 +438,11 @@ void ui_show_card(void) {
             lv_obj_add_flag(g_rows[i], LV_OBJ_FLAG_HIDDEN);
         }
     }
-    // Never take the screen away from a popup the user is mid-decision on.
-    if (lv_screen_active() != g_card_scr && lv_screen_active() != g_popup) {
-        lv_screen_load_anim(g_card_scr, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
-    }
+    // Deliberately does not switch to the card. §6's checklist is the right
+    // design for a collision, but this screen has never been drawn — it is
+    // stock widgets over tinted bars — and raising it hides the grid behind
+    // something worse. Due actions still chime and still show on their tile.
+    // Restore the screen load here once the card is designed.
 }
 
 /** ~30fps, and only the waterline moves. */

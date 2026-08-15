@@ -33,3 +33,13 @@ CONFIG_LV_USE_PERF_MONITOR=y
 # display was up. Framebuffer corruption reports nothing.
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 CONFIG_LV_USE_SNAPSHOT=y
+
+# The BSP's default draw buffer is one 100-row strip, and LVGL composes the
+# screen in pieces through it. That is fine for a demo; this UI draws six
+# tiles with washes, dot rows and a 30fps waterline, and the strips arrived
+# on the panel torn — a corrupted band through the middle that looked for
+# all the world like a driver fault. A full-screen buffer removes the
+# strips entirely. 368*448*2 = 330KB, which is nothing against 8MB of PSRAM.
+CONFIG_BSP_DISPLAY_LVGL_AVOID_TEAR=y
+CONFIG_BSP_DISPLAY_LVGL_FULL_REFRESH=y
+CONFIG_WFH_DUMP_FRAMEBUFFER=y

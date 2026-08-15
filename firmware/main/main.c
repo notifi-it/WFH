@@ -45,6 +45,11 @@ static void dump_screen(void) {
     uint8_t *mem = heap_caps_malloc(stride * h, MALLOC_CAP_SPIRAM);
     if (!mem) { ESP_LOGE(TAG, "no PSRAM for snapshot"); return; }
 
+    // Pre-fill with magenta: anything LVGL does not paint stays magenta, so
+    // "the renderer left this alone" and "the renderer drew something odd"
+    // stop looking the same in the capture.
+    for (size_t i = 0; i < (size_t)stride * h; i += 2) { mem[i] = 0x1F; mem[i+1] = 0xF8; }
+
     lv_draw_buf_t buf;
     lv_draw_buf_init(&buf, w, h, LV_COLOR_FORMAT_RGB565, stride, mem, stride * h);
 
