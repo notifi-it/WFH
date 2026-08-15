@@ -49,6 +49,8 @@ static lv_obj_t *g_pop_name, *g_pop_blurb, *g_pop_state, *g_pop_sound, *g_pop_do
 // §7.2's dot row. Four states, and skipped vs missed stay visually distinct:
 // deciding not to eat lunch and forgetting to log lunch are different facts.
 #define MAX_DOTS 14
+#define DOT_INSET 14
+#define TILE_BORDER 2
 typedef enum { DOT_HIDDEN, DOT_DONE, DOT_SKIP, DOT_MISS, DOT_PEND } dot_state_t;
 static lv_obj_t   *g_dot[ACTIONS_MAX][MAX_DOTS];
 static dot_state_t g_dot_state[ACTIONS_MAX][MAX_DOTS];
@@ -204,7 +206,7 @@ static void build_grid(void) {
         g_cd[i] = lv_label_create(t);
         lv_obj_set_style_text_font(g_cd[i], &lv_font_montserrat_24, 0);
         lv_obj_set_style_text_color(g_cd[i], lv_color_hex(0xe6edf3), 0);
-        lv_obj_align(g_cd[i], LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+        lv_obj_align(g_cd[i], LV_ALIGN_TOP_RIGHT, -10, 8);
     }
 }
 
@@ -378,14 +380,19 @@ static void dots_refresh(int a) {
 
     if (n != g_dot_shown[a]) {                          // lay the row out once
         g_dot_shown[a] = n;
-        const int32_t avail = lv_obj_get_content_width(g_tile[a]) - 16 - 56;
-        int pitch = n > 0 ? (int)(avail / n) : 11;
-        if (pitch > 11) pitch = 11;
-        const int size = (pitch - 2) < 5 ? 5 : (pitch - 2);
+        // Measured from constants, not from lv_obj_get_content_width(): the
+        // first refresh happens before LVGL has run layout, so the query
+        // returns nothing useful, the pitch comes out garbage and the dots
+        // pile on top of each other. Worse, the row is only re-laid-out when
+        // the count changes, so it never corrects itself.
+        const int32_t avail = TILE_W - 2 * TILE_BORDER - 2 * DOT_INSET;
+        int pitch = n > 0 ? (int)(avail / n) : 14;
+        if (pitch > 14) pitch = 14;
+        const int size = (pitch - 3) < 6 ? 6 : (pitch - 3);
         for (int d = 0; d < n; d++) {
             lv_obj_set_size(g_dot[a][d], size, size);
             lv_obj_set_style_radius(g_dot[a][d], size, 0);
-            lv_obj_align(g_dot[a][d], LV_ALIGN_BOTTOM_LEFT, 8 + d * pitch, -12);
+            lv_obj_align(g_dot[a][d], LV_ALIGN_BOTTOM_LEFT, DOT_INSET + d * pitch, -DOT_INSET);
         }
         for (int d = n; d < MAX_DOTS; d++) dot_set(a, d, DOT_HIDDEN, 0);
     }
@@ -417,7 +424,7 @@ void ui_refresh(void) {
             // Interval actions fill across their whole cadence; fixed ones
             // across the final hour, since a wash creeping up over the four
             // hours before lunch would be imperceptible anyway.
-            const int32_t box = lv_obj_get_content_height(g_tile[i]);
+            const int32_t box = TILE_H - 2 * TILE_BORDER;
             const time_t span = (g_settings.actions[i].cadence.kind == CADENCE_INTERVAL)
                                 ? (time_t)g_settings.actions[i].cadence.every_min * 60
                                 : 3600;
@@ -472,12 +479,12 @@ static void wave_cb(lv_timer_t *timer) {
     g_wave_phase += 12;
 
     for (int i = 0; i < g_settings.n_actions; i++) {
-        const int32_t box = lv_obj_get_content_height(g_tile[i]);
+        const int32_t box = TILE_H - 2 * TILE_BORDER;
         const int32_t h   = lv_obj_get_height(g_wash[i]);
         if (h <= 1 || h >= box) { lv_obj_add_flag(g_wave[i], LV_OBJ_FLAG_HIDDEN); continue; }
         lv_obj_clear_flag(g_wave[i], LV_OBJ_FLAG_HIDDEN);
 
-        const int32_t w = lv_obj_get_content_width(g_tile[i]);
+        const int32_t w = TILE_W - 2 * TILE_BORDER;
         const int32_t crest = box - h;
         for (int p = 0; p < WAVE_PTS; p++) {
             // Two sines at different rates so the crest never reads as a
