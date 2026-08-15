@@ -1207,11 +1207,11 @@ Every call site that currently does `ESP_LOGx(...)` on something worth rememberi
 |---|---|---|---|---|
 | R1 | ~~SQLite insert latency degrades on LittleFS~~ — **fired.** ~3s/insert at 688 rows, WAL unavailable. Kill switch taken: one append-only file per day (§3.4) | — | — | **closed by S2** |
 | R2 | ~~Board in hand is V2~~ — **closed.** The board is V1 (SH8601 + FT5x06, read from the factory firmware's strings) | — | — | **closed** |
-| R3 | AXP2101 rail/charging misconfig — dark panel, mistreated battery | medium | medium | spike S1 |
-| R4 | Codec/PA chain: silence, boot pop, idle hiss | medium | low | spike S3 |
+| R3 | ~~AXP2101 rail misconfig~~ — **closed.** Vendor BSP configures the rails; panel lit at 368x448 | — | — | **closed by S1** |
+| R4 | ~~Codec/PA chain~~ — **closed.** ES8311 opens via `esp_codec_dev`, §9 cues play through the amp gate | — | — | **closed by S3** |
 | R5 | Light sleep breaks a peripheral (touch wake, I2S after wake, tick cadence) | medium | medium | spike S3, §11 step 11 |
 | R6 | TZ/DST wrong — POSIX string, no zoneinfo on the board | low | high | §2.1 `tz` + `dst-forward` fixture |
-| R7 | LVGL full-frame effects (wash + grain) miss frame budget | low | low | design loop + spike S1 |
+| R7 | LVGL full-frame effects (wash + grain) miss frame budget | low | low | still open — S1 drew static tiles, not the animated wash |
 
 **R1 is the one that could force a design change**, which is why it gets benchmarked before the build starts. There are field reports of the ESP32 SQLite port slowing to seconds per insert in the low thousands of rows on LittleFS — and 400-day retention (§3.4) means ~12,000 rows. The reported cases smell like per-write connection churn and no page cache, both of which this design already avoids (one long-lived connection, §3.4), but that is a hypothesis to test, not a fact to lean on. Mitigations in order: `PRAGMA cache_size` big enough to hold the whole ~1MB database in PSRAM, `page_size=4096` set before first write, and measuring again. **Kill switch:** `store_add_event` / `store_load_day` are the entire storage API — if SQLite still can't hold p99 under ~50ms per insert at 15k rows, swap the implementation for per-day JSONL append files and turn §13.3's history queries into a laptop script over `curl`-pulled files. `derive` and everything above it never know.
 
@@ -1251,8 +1251,20 @@ SQLite is not in the registry: vendor `nopnop2002/esp32-idf-sqlite3` (the IDF-5-
 
 ### 15.3 Three spikes, then the build order
 
-- **S1 — panel, touch, PMIC (half day).** Vendor demo for the revision in hand, then an LVGL hello-world against the pinned components with the PMIC rails configured from scratch. Retires R2, R3, and R7 (put the grain overlay in the hello-world).
+- **S1 — panel, touch, PMIC.** ✅ Run. `spikes/s1-board` draws the §7 grid at real size on the panel, with touch and the §9 cues wired. Two findings below cost most of the spike and would have cost far more later. R2 and R3 closed; R7 still open, because the tiles drawn were static.
 - **S2 — storage under load (half day).** ✅ **Run, and it triggered the kill switch.** SQLite managed ~3s per insert at 688 rows with WAL unavailable; the file backend does 18.9ms p50, flat from 3k to 15k rows. Full numbers in §3.4. The stated pass bar was p99 < 50ms and the file backend does not meet it either — p99 is 558ms of flash garbage collection — but it does not degrade, which was the property that actually mattered. The residual p99 question is stated in §3.4 and left open deliberately.
-- **S3 — sound and sleep (half day).** `esp_codec_dev` beep through the PA gate (no boot pop, no idle hiss, silent when `PA_CTRL` is low), then auto light sleep on: confirm touch wakes the panel, I2S plays cleanly after wake, and the 1 Hz tick keeps cadence. Retires R4, most of R5.
+- **S3 — sound and sleep.** ◐ Sound done in the same flash as S1: ES8311 opens through the BSP's I2C and plays §9's bloom/success/ready with the real envelope. R4 closed. **The sleep half is not done** — light sleep, wake-on-touch and tick cadence remain, so R5 is still open.
+
+**The two findings from S1, both worth more than the spike cost.**
+
+1. **The vendor BSP is versioned by board revision, and the default is the wrong one.** `waveshare/esp32_s3_touch_amoled_1_8` 2.x drives CO5300 + CST816S — V2 hardware — and on a V1 board it initialises a CO5300 against an SH8601 panel and then aborts on `Touch not found`. The 1.x line (`~1.1.4`) is the V1 BSP. Pin the major version to the board revision; `^2` on a V1 board is a crash, not a warning.
+2. **The touch controller is held in reset until you release it, and the BSP does not.** `TP_RESET` is `EXIO2` on the TCA9554, so FT3168 never answers and `bsp_display_start()` aborts inside `bsp_touch_new`. Drive EXIO2 low-then-high via `bsp_io_expander_init()` **before** `bsp_display_start()`. An I2C scan is what separates "touch absent" from "touch in reset" — the driver error is identical either way:
+
+```
+i2c scan (before expander): 0x18 0x20 0x34 0x51 0x6B          ES8311, TCA9554, AXP2101, PCF85063, QMI8658
+i2c scan (after touch reset): 0x18 0x20 0x34 0x38 0x51 0x6B    + FT3168
+```
+
+That scan is also the cheapest possible board-health check, and worth keeping in bring-up permanently.
 
 A failed spike changes the plan while the plan is still cheap to change. That is the entire budget: a day and a half before §11 step 1.
