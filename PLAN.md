@@ -1258,7 +1258,17 @@ SQLite is not in the registry: vendor `nopnop2002/esp32-idf-sqlite3` (the IDF-5-
 **The two findings from S1, both worth more than the spike cost.**
 
 1. **The vendor BSP is versioned by board revision, and the default is the wrong one.** `waveshare/esp32_s3_touch_amoled_1_8` 2.x drives CO5300 + CST816S — V2 hardware — and on a V1 board it initialises a CO5300 against an SH8601 panel and then aborts on `Touch not found`. The 1.x line (`~1.1.4`) is the V1 BSP. Pin the major version to the board revision; `^2` on a V1 board is a crash, not a warning.
-2. **The touch controller is held in reset until you release it, and the BSP does not.** `TP_RESET` is `EXIO2` on the TCA9554, so FT3168 never answers and `bsp_display_start()` aborts inside `bsp_touch_new`. Drive EXIO2 low-then-high via `bsp_io_expander_init()` **before** `bsp_display_start()`. An I2C scan is what separates "touch absent" from "touch in reset" — the driver error is identical either way:
+2. **The V1 BSP creates the I/O expander and then never drives a pin of it — and three panel-critical lines hang off that expander.** `bsp_io_expander_init()` returns a handle; nothing in the BSP calls `set_dir` or `set_level`. So unless the application does it:
+
+   | Expander pin | Line | Consequence of leaving it |
+   |---|---|---|
+   | EXIO0 | `LCD_RESET` | controller never released from reset |
+   | EXIO1 | `DSI_PWR_EN` | **panel has no VCI — the screen stays black** |
+   | EXIO2 | `TP_RESET` | touch never answers; `bsp_display_start()` aborts in `bsp_touch_new` |
+
+   The panel-power one is the nastiest failure in this whole build so far, because **it does not look like a failure**: `sh8601: LCD panel create success`, `panel up: 368x448`, brightness accepted, every SPI write returning `ESP_OK` — into a display with no power. There is no error anywhere to grep for. Drive EXIO1 high, pulse EXIO0 and EXIO2 low-then-high, *then* call `bsp_display_start()`.
+
+   An I2C scan is what separates "touch absent" from "touch in reset" — the driver error is identical either way:
 
 ```
 i2c scan (before expander): 0x18 0x20 0x34 0x51 0x6B          ES8311, TCA9554, AXP2101, PCF85063, QMI8658

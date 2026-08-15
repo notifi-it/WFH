@@ -127,20 +127,27 @@ void app_main(void) {
     ESP_ERROR_CHECK(bsp_i2c_init());
     i2c_scan("before expander");
 
-    // TP_RESET hangs off the TCA9554 (EXIO2 on the schematic), so the touch
-    // controller is held in reset until something drives it high. The BSP
-    // does not do this before probing, which is why FT5x06 init failed.
+    // Three panel-critical lines hang off the TCA9554, and the V1 BSP creates
+    // the expander handle without ever driving a pin. Until something does,
+    // the panel has no VCI and both controllers sit in reset — which looks
+    // exactly like working init, because every SPI write "succeeds" into a
+    // display that is not powered.
+    //   EXIO0 = LCD_RESET, EXIO1 = DSI_PWR_EN, EXIO2 = TP_RESET
     esp_io_expander_handle_t exp = bsp_io_expander_init();
-    if (exp) {
-        esp_io_expander_set_dir(exp, IO_EXPANDER_PIN_NUM_2, IO_EXPANDER_OUTPUT);
-        esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_2, 0);
-        vTaskDelay(pdMS_TO_TICKS(20));
-        esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_2, 1);
-        vTaskDelay(pdMS_TO_TICKS(120));            // FT3168 needs time to come up
-        i2c_scan("after touch reset");
-    } else {
-        ESP_LOGE(TAG, "io expander init failed");
-    }
+    if (!exp) { ESP_LOGE(TAG, "io expander init failed"); return; }
+
+    const uint32_t PANEL_PINS = IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_2;
+    ESP_ERROR_CHECK(esp_io_expander_set_dir(exp, PANEL_PINS, IO_EXPANDER_OUTPUT));
+
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_1, 1);      // panel power on
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_2, 0);   // both in reset
+    vTaskDelay(pdMS_TO_TICKS(20));
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_2, 1);   // release
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    i2c_scan("after panel power + resets");
 
     lv_display_t *disp = bsp_display_start();
     if (!disp) { ESP_LOGE(TAG, "display start failed — PMIC rails or panel driver"); return; }
