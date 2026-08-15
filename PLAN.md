@@ -527,58 +527,14 @@ Collisions are common: stand (40m), water (45m) and roll (60m) align exactly eve
 
 Stretches never join the checklist. If a stretch is due alongside anything else, the stretch takes the screen on its own (§7.6) and everything else stays on the card, waiting.
 
-```c
-// firmware/main/card.c
-// Reconciles the card against `derive`'s due set every tick. Rows are
-// additive and sticky: a row that's still due keeps whatever checked
-// state the user gave it; a row no longer due (answered elsewhere, e.g.
-// a grid-tile tap) simply disappears.
-void card_sync(const action_id_t *due, int n_due, time_t now) {
-    // Drop rows no longer due.
-    for (int i = g_card_len - 1; i >= 0; i--) {
-        if (!in_list(due, n_due, g_card[i].action)) card_remove(i);
-    }
-    // Add newly-due rows, unchecked.
-    for (int i = 0; i < n_due; i++) {
-        if (!card_contains(due[i])) card_push(due[i], /* checked */ false);
-    }
+**Built and tested** — `firmware/main/card.c`, with the nine scenarios in `firmware/test/test_card.c`. Every side effect goes through a `card_host_t` of function pointers (logging, screen changes, the stretch hand-off), which is what lets the whole state machine run on a laptop; the firmware wires those to `input_done`/`input_skip` and LVGL, the test wires them to a recorder.
 
-    bool has_stretch = false;
-    for (int i = 0; i < g_card_len; i++) has_stretch |= ACTIONS[g_card[i].action].flow == FLOW_STRETCH;
-    if (has_stretch) { card_take_stretch(); return; }   // stretch pre-empts, §7.6
+Writing it turned up two bugs in this section's earlier pseudocode, both now fixed in the implementation:
 
-    if (g_card_len > 0) ui_show_card();
-}
+- **The card redrew every tick.** `card_sync` ended with `if (g_card_len > 0) ui_show_card();`, and `ui_show_card` (§7.3) cleans the screen, rebuilds every row and re-runs a load animation. At 1 Hz that wipes a half-made decision once a second — the exact thing `card_sync` exists to protect. It now returns whether the row set actually changed and only redraws on a change.
+- **The stretch was pushed as a row, then handled.** §6 says stretches never join the checklist, but the code added every due action first and only afterwards checked whether one of them was a stretch. A stretch-flow action is now skipped when rows are built, so it can never be checked, confirmed, or counted as a row.
 
-void card_toggle(int row) { g_card[row].checked = !g_card[row].checked; ui_refresh_card(); }
-
-void card_confirm(void) {
-    for (int i = g_card_len - 1; i >= 0; i--) {
-        if (g_card[i].checked) { input_done(g_card[i].action); card_remove(i); }
-    }
-    if (g_card_len == 0) ui_show_grid();
-}
-
-void card_skip_row(int row) {
-    input_skip(g_card[row].action);
-    card_remove(row);
-    if (g_card_len == 0) ui_show_grid();
-}
-
-void card_delay_all(time_t now) {
-    time_t until = now + 15 * 60;
-    for (int i = 0; i < g_card_len; i++) g_day.snoozed_until[g_card[i].action] = until;
-    card_clear();
-    ui_show_grid();
-}
-
-void card_dismiss(void) {
-    // Not a skip and not a miss for anything on the card, checked or not.
-    // Nothing is written; card_sync rebuilds it from derive() next tick.
-    card_clear();
-    ui_show_grid();
-}
-```
+The scenarios were mutation-checked the same way as `derive`: broken row lookup, Confirm taking unchecked rows, Delay-all compounding, Delay-all ignoring unchecked rows, the stretch joining the list, redrawing every tick, and the key answering the wrong end of the list. All seven caught.
 
 `card_sync` running every tick — rather than the card being built once when it opens — is what makes it correct to leave the board mid-decision: check two boxes, get pulled away, come back an hour later, and the card still reflects exactly what's actually due, with your two checks intact and nothing double-logged.
 
@@ -1172,7 +1128,7 @@ Firmware first, because it is the product and it is the long pole. Each step sho
 2. **Config generation** — `actions.json` → `actions.g.h`, wired into the build with the CI diff check.
 3. **Storage** — LittleFS partition, SQLite, schema, `store_add_event` / `store_load_day`. Verifiable on its own with a serial console before any UI exists.
 4. **`derive`** ✅ — the walk, the anchor rule, the due window, and the §11.1 fixtures, all host-built and mutation-checked. `day_apply_event` still to come, on top of step 3. **This was the step to get right**; everything else is presentation.
-5. **Scheduler tick and the checklist card** (§6) — due detection, `card_sync`, Confirm/Skip/Delay-all/X. Testable on-desk by moving the RTC forward.
+5. **Scheduler tick and the checklist card** (§6) — card logic ✅ (`card.c`, host-tested and mutation-checked); the 1 Hz tick that drives it lands with bring-up, and is testable on-desk by moving the RTC forward.
 6. **Grid UI** — tiles, dots, wash, header, the shared X component (§7.3a). First point at which the thing looks like itself.
 7. **Inputs** — card rows, tile-tap logging, physical key (§7.4).
 8. **Sound** — the cue table, the I2S tone task, escalation (§9).

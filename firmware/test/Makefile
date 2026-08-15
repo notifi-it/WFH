@@ -4,15 +4,20 @@
 CC      ?= cc
 CFLAGS  ?= -std=c11 -Wall -Wextra -Werror -O1 -g -I../main
 ROOT     = ../..
-SRCS     = test_derive.c ../main/derive.c ../main/config.c
+CORE     = ../main/derive.c ../main/config.c
 GENERATED = ../main/actions.g.h fixtures.g.h
 
 .PHONY: run gen check-gen clean
-run: test_derive
+run: test_derive test_card
 	./test_derive
+	@echo
+	./test_card
 
-test_derive: $(SRCS) $(GENERATED)
-	$(CC) $(CFLAGS) -o $@ $(SRCS)
+test_derive: test_derive.c $(CORE) $(GENERATED)
+	$(CC) $(CFLAGS) -o $@ test_derive.c $(CORE)
+
+test_card: test_card.c ../main/card.c $(CORE) $(GENERATED)
+	$(CC) $(CFLAGS) -o $@ test_card.c ../main/card.c $(CORE)
 
 gen:
 	node $(ROOT)/tools/gen-config.mjs
@@ -23,4 +28,4 @@ check-gen: gen
 	git -C $(ROOT) diff --exit-code -- firmware/main/actions.g.h firmware/test/fixtures.g.h
 
 clean:
-	rm -f test_derive
+	rm -f test_derive test_card
