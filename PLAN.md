@@ -1251,7 +1251,9 @@ SQLite is not in the registry: vendor `nopnop2002/esp32-idf-sqlite3` (the IDF-5-
 
 ### 15.3 Three spikes, then the build order
 
-- **S1 — panel, touch, PMIC.** ✅ Run. `spikes/s1-board` draws the §7 grid at real size on the panel, with touch and the §9 cues wired. Two findings below cost most of the spike and would have cost far more later. R2 and R3 closed; R7 still open, because the tiles drawn were static.
+- **S1 — panel, touch, PMIC.** ✅ **Passed.** `spikes/s1-board` draws the §7 grid at real size on the panel, with touch and the §9 cues wired. Panel lights at 368x448; touch reports through LVGL and **every tap landed inside the tile it named** — checked against the layout rectangles, so the coordinate mapping has no rotation or mirroring error despite the BSP's `sw_rotate`. R2 and R3 closed. R7 still open: the tiles drawn were static, and the animated wash is the thing with a frame budget.
+
+  Three findings below cost most of the spike and would have cost far more later.
 - **S2 — storage under load (half day).** ✅ **Run, and it triggered the kill switch.** SQLite managed ~3s per insert at 688 rows with WAL unavailable; the file backend does 18.9ms p50, flat from 3k to 15k rows. Full numbers in §3.4. The stated pass bar was p99 < 50ms and the file backend does not meet it either — p99 is 558ms of flash garbage collection — but it does not degrade, which was the property that actually mattered. The residual p99 question is stated in §3.4 and left open deliberately.
 - **S3 — sound and sleep.** ◐ Sound done in the same flash as S1: ES8311 opens through the BSP's I2C and plays §9's bloom/success/ready with the real envelope. R4 closed. **The sleep half is not done** — light sleep, wake-on-touch and tick cadence remain, so R5 is still open.
 
