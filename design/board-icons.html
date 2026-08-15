@@ -5,6 +5,10 @@
   368x448, no header bar. Icon-led tiles: the icon is the only identifier,
   the dots carry the day, and the wash is the countdown.
 -->
+<style id="fonts">
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-700.woff2") format("woff2"); font-weight: 700; }
+</style>
 <style>
   :root {
     --bg:      #0d1117;
@@ -18,7 +22,7 @@
   html, body { width: 368px; height: 448px; overflow: hidden; }
   body {
     background: var(--bg);
-    font: 400 13px/1.2 -apple-system, "SF Pro Text", Inter, system-ui, sans-serif;
+    font: 500 13px/1.2 Geist, -apple-system, system-ui, sans-serif;
     color: var(--text);
     -webkit-font-smoothing: antialiased;
   }
