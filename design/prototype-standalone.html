@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en">
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=368, initial-scale=1">
 <title>WFH board — prototype</title>
 <!--
   Clickable mock of the whole board at 368x448. Tap a tile to open its popup,
@@ -20,19 +20,13 @@
     --pending:#30363d; --grey:#6e7681;
   }
   * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent }
-  body {
-    background:#07090c; color:var(--text);
+  html, body {
+    width:368px; height:448px; overflow:hidden;
+    background:var(--bg); color:var(--text);
     font:500 14px/1.35 Geist, -apple-system, system-ui, sans-serif;
     -webkit-font-smoothing:antialiased;
-    min-height:100vh; display:grid; place-items:center; gap:14px;
-    padding:24px; grid-auto-flow:row;
   }
-  .frame {
-    position:relative; width:368px; height:448px; overflow:hidden;
-    background:var(--bg); border-radius:26px;
-    box-shadow:0 0 0 10px #16181d, 0 0 0 11px #2a2e35, 0 24px 60px #0007;
-  }
-  .hint { color:#4b525c; font-size:12px; letter-spacing:.02em }
+  .frame { position:relative; width:368px; height:448px; overflow:hidden; background:var(--bg) }
 
   .screen { position:absolute; inset:0; opacity:0; pointer-events:none; transition:opacity .16s ease }
   .screen.on { opacity:1; pointer-events:auto }
@@ -119,7 +113,6 @@
     </div>
   </div>
 </div>
-<p class="hint">tap a tile · Done / Skip / X · the numbers are fake</p>
 
 <script>
 const ICONS = {
