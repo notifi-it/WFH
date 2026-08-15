@@ -36,10 +36,18 @@ const char *store_day_key(time_t ts) {
 static void pragma_into(const char *sql, char *out, size_t n) {
     sqlite3_stmt *st;
     out[0] = '\0';
-    if (sqlite3_prepare_v2(g_db, sql, -1, &st, NULL) != SQLITE_OK) return;
-    if (sqlite3_step(st) == SQLITE_ROW) {
+
+    const int rc = sqlite3_prepare_v2(g_db, sql, -1, &st, NULL);
+    if (rc != SQLITE_OK) {
+        ESP_LOGE(TAG, "pragma prepare failed (%d): %s -- %s", rc, sqlite3_errmsg(g_db), sql);
+        return;
+    }
+    const int step = sqlite3_step(st);
+    if (step == SQLITE_ROW) {
         const unsigned char *v = sqlite3_column_text(st, 0);
         if (v) { strncpy(out, (const char *)v, n - 1); out[n - 1] = '\0'; }
+    } else {
+        ESP_LOGE(TAG, "pragma step returned %d: %s -- %s", step, sqlite3_errmsg(g_db), sql);
     }
     sqlite3_finalize(st);
 }
@@ -91,7 +99,11 @@ bool store_add_event(const log_event_t *ev, const settings_t *s) {
              (unsigned long)esp_random(), (unsigned long)(esp_random() & 0xffff));
 
     sqlite3_stmt *st;
-    if (sqlite3_prepare_v2(g_db, SQL, -1, &st, NULL) != SQLITE_OK) return false;
+    const int prc = sqlite3_prepare_v2(g_db, SQL, -1, &st, NULL);
+    if (prc != SQLITE_OK) {
+        ESP_LOGE(TAG, "prepare failed (%d): %s", prc, sqlite3_errmsg(g_db));
+        return false;
+    }
     sqlite3_bind_text(st, 1, uuid, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 2, store_day_key(ev->ts), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(st, 3, s->actions[ev->action].id, -1, SQLITE_STATIC);

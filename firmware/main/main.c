@@ -52,7 +52,16 @@ void app_main(void) {
     // rather than piling every row into one key.
     const time_t base = time(NULL) - (time_t)(TOTAL_EVENTS / EVENTS_PER_DAY) * 86400;
 
+    printf("inserting %d events...\n", TOTAL_EVENTS);
+    const int64_t run_start = esp_timer_get_time();
+
     for (int i = 0; i < TOTAL_EVENTS; i++) {
+        // Heartbeat: without it, "very slow" and "hung" look identical on
+        // the wire, and telling those apart is the whole point of R1.
+        if (i % 25 == 0) {
+            printf("  [%5d] %.1fs elapsed\n", i, (esp_timer_get_time() - run_start) / 1e6);
+            fflush(stdout);
+        }
         log_event_t ev = {
             .action = i % s->n_actions,
             .kind   = (i % 9 == 0) ? KIND_SKIP : KIND_DONE,

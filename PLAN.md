@@ -243,132 +243,67 @@ With no client, this is simply the board computing its own view for its own scre
 
 The fixtures in §11.1 still earn their place for the one implementation that exists.
 
-### 3.4 Persistence — SQLite
+### 3.4 Persistence — one append-only file per day
 
-The board's store is a SQLite database on a LittleFS partition. The full rationale is in §13; the short version is that the model from §3.1 *is* a table, and SQL expresses it more plainly than hand-rolled blob packing does.
+**This section used to specify SQLite. Spike S2 (§15.3) measured it on the board and it failed, so R1's kill switch fired.** The numbers, 15,000 inserts on the real hardware:
 
-**The schema is the data model.** Reading it should tell you everything §3.1 says.
+| | SQLite on LittleFS | one file per day |
+|---|---|---|
+| typical insert (p50) | ~3,060ms at 688 rows | **18.9ms** |
+| mean | — | 51.2ms |
+| p99 | — | 558ms |
+| worst | — | 1,234ms |
+| trend with row count | degrading, never reached 1k | **flat from 3k to 15k** |
+| WAL available | **no** | n/a |
+| flash cost | +265KB | 0 |
 
-```sql
--- firmware/main/schema.sql  (embedded in the binary, run at every boot)
+Two things killed it. The insert cost was 60× the budget before the database was a tenth of its retention size, and — the part that removed the argument entirely — **`PRAGMA journal_mode=WAL` returns no row on this port**, so the crash-safety that §13 called "the other quiet win" was never going to be there. A B-tree updating pages in the middle of a file is close to the worst thing you can ask of a copy-on-write filesystem on raw flash.
 
-CREATE TABLE IF NOT EXISTS events (
-  id      TEXT PRIMARY KEY,        -- uuid v4
-  day     TEXT NOT NULL,           -- 'YYYY-MM-DD', local time
-  action  TEXT NOT NULL,           -- 'water', 'stand', …
-  kind    TEXT NOT NULL CHECK (kind IN ('done', 'skip')),
-  ts      INTEGER NOT NULL,        -- epoch seconds: when the user tapped
-  slot    INTEGER NOT NULL,        -- epoch seconds: which slot this answers
+**What replaces it.** One append-only file per day, `\t`-separated, one line per event:
 
-  -- One answer per slot. This single line replaces every dedupe check in
-  -- the codebase: double-taps, a Confirm covering an already-answered row,
-  -- and replayed events all collapse here.
-  UNIQUE (action, slot)
-);
-
-CREATE INDEX IF NOT EXISTS events_day ON events (day);
-
-CREATE TABLE IF NOT EXISTS settings (
-  key     TEXT PRIMARY KEY,
-  value   TEXT NOT NULL
-);
+```
+/fs/d/2026-08-13
+1723645210  1723645020  water  done  3f9a1c04d1e88b02
+1723646400  1723646400  stand  skip  8c2b77e0a45f1993
 ```
 
-**Opening it.** The ESP32 port (siara-cc's `esp32-idf-sqlite3`) needs a VFS backed by a filesystem partition; LittleFS is the better choice over FATFS here for its wear levelling and its tolerance of unclean shutdowns, which a battery-powered device will produce.
+`<ts>\t<slot>\t<action>\t<kind>\t<uuid>`. Plain text, greppable, and `cat`-able over the §8 debug endpoint. TSV rather than the JSON the kill switch originally sketched: identical properties, one `fprintf` to write, one `sscanf` to read, and no JSON parser in the firmware.
+
+**Appending is the one thing LittleFS is genuinely good at**, and the design leans on exactly that. Durability comes from `fflush` + `fsync` after each line, which is what `synchronous=FULL` was buying.
+
+**The open day stays open.** This is the difference between the flat line above and a slow crawl, and it was measured rather than assumed: opening a file costs a linear scan of the directory, so with 400 days retained an open-per-write makes every tap pay for every day ever recorded. Holding the handle and the day's events in RAM turned p50 from ~90ms-and-climbing into 24ms-and-flat.
 
 ```c
-// firmware/main/store.c
-static sqlite3 *g_db;
+// firmware/main/store_files.c
+static char      g_open_day[11];
+static FILE     *g_fp;
+static day_log_t g_cache;      // the same in-RAM day §4 already wanted
 
-esp_err_t store_open(void) {
-    esp_vfs_littlefs_conf_t fs = {
-        .base_path = "/fs", .partition_label = "storage", .format_if_mount_failed = true,
-    };
-    ESP_ERROR_CHECK(esp_vfs_littlefs_register(&fs));
+bool store_add_event(const log_event_t *ev, const settings_t *s) {
+    const char *day = store_day_key(ev->ts);
+    if (!open_day(day, s)) return false;       // reloads + reopens only on rollover
 
-    if (sqlite3_open("/fs/wfh.db", &g_db) != SQLITE_OK) {
-        ESP_LOGE(TAG, "open failed: %s", sqlite3_errmsg(g_db));
-        return ESP_FAIL;
+    // UNIQUE (action, slot) moves from the schema to here. It is the one
+    // thing genuinely lost with SQLite, so it is the one thing the tests
+    // have to keep honest.
+    for (int i = 0; i < g_cache.events_len; i++) {
+        if (g_cache.events[i].action == ev->action && g_cache.events[i].slot == ev->slot) return false;
     }
 
-    // WAL keeps a power cut mid-write from corrupting the database: the
-    // last committed transaction survives and the partial one is discarded.
-    //
-    // Two lines here are load-bearing. The port's VFS has no shared-memory
-    // methods (io_methods version 1), and SQLite only permits WAL without
-    // shared memory when locking_mode=EXCLUSIVE is set *before* the first
-    // WAL access (sqlite.org/wal.html) — fine, this is the only connection
-    // there will ever be. And a journal_mode pragma that cannot switch does
-    // not error: it silently leaves you on DELETE, so check what came back.
-    sqlite3_exec(g_db, "PRAGMA locking_mode=EXCLUSIVE;", NULL, NULL, NULL);
-    const char *mode = pragma_text(g_db, "PRAGMA journal_mode=WAL;");
-    if (strcasecmp(mode, "wal") != 0) ESP_LOGW(TAG, "no WAL, running on %s", mode);
-    sqlite3_exec(g_db, "PRAGMA synchronous=FULL;",   NULL, NULL, NULL);
-    sqlite3_exec(g_db, "PRAGMA foreign_keys=ON;",    NULL, NULL, NULL);
-    sqlite3_exec(g_db, SCHEMA_SQL, NULL, NULL, NULL);   // CREATE IF NOT EXISTS
-    return ESP_OK;
+    fprintf(g_fp, "%lld\t%lld\t%s\t%s\t%08lx%08lx\n", …);
+    fflush(g_fp);
+    fsync(fileno(g_fp));
+    g_cache.events[g_cache.events_len++] = *ev;
+    return true;
 }
 ```
 
-`synchronous=FULL` costs a flush per write. At ~30 writes a day that is free, and it is what makes "the screen said Done, so it is recorded" true across a battery cut.
+**Retention** is `unlink` on any file whose name sorts before the cutoff — ISO dates sort lexically, so the comparison is `strcmp`. Measured at 1.9s for a 400-day sweep, which is a once-per-boot cost and invisible.
 
-**Writing an event** is one statement. Note there is no dedupe code — `INSERT OR IGNORE` against the `UNIQUE` constraint does it, and `sqlite3_changes` tells us whether the row was new.
+**The honest caveat: p99 is 558ms and the worst case is 1.2s.** That is flash garbage collection, it is inherent, and it does not grow with the data. At ~30 writes a day it means a sub-second hitch roughly every few days. If that ever shows up as a felt problem the answer is to move the write off the UI path — but §4's guarantee is that the screen reflects what was *stored*, so that is a real trade to make deliberately, not a tweak. **Not decided here.**
 
-```c
-// Returns true if this was a new event, false if we already had it.
-bool store_add_event(const log_event_t *ev) {
-    static const char *SQL =
-        "INSERT OR IGNORE INTO events (id, day, action, kind, ts, slot)"
-        " VALUES (?1, ?2, ?3, ?4, ?5, ?6);";
+**What this costs.** No SQL, so §13's historical queries become a script over pulled files rather than a query on the device. The event log itself is unchanged — §3.1's model was never relational, it was always an append-only log, which is exactly what it is now stored as.
 
-    sqlite3_stmt *st;
-    sqlite3_prepare_v2(g_db, SQL, -1, &st, NULL);
-    sqlite3_bind_text(st, 1, ev->id,                  -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 2, day_key(ev->ts),         -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(st, 3, ACTIONS[ev->action].id,  -1, SQLITE_STATIC);
-    sqlite3_bind_text(st, 4, ev->kind == KIND_DONE ? "done" : "skip", -1, SQLITE_STATIC);
-    sqlite3_bind_int64(st, 5, ev->ts);
-    sqlite3_bind_int64(st, 6, ev->slot);
-
-    int rc = sqlite3_step(st);
-    sqlite3_finalize(st);
-
-    if (rc != SQLITE_DONE) { ESP_LOGE(TAG, "insert: %s", sqlite3_errmsg(g_db)); return false; }
-    return sqlite3_changes(g_db) > 0;
-}
-```
-
-**Reading a day back** into the struct `derive` walks:
-
-```c
-void store_load_day(const char *day, day_log_t *out) {
-    out->events_len = 0;
-
-    sqlite3_stmt *st;
-    sqlite3_prepare_v2(g_db,
-        "SELECT action, kind, ts, slot FROM events WHERE day = ?1 ORDER BY ts;",
-        -1, &st, NULL);
-    sqlite3_bind_text(st, 1, day, -1, SQLITE_STATIC);
-
-    while (sqlite3_step(st) == SQLITE_ROW && out->events_len < EVENTS_MAX) {
-        log_event_t *e = &out->events[out->events_len++];
-        e->action = action_from_id((const char *)sqlite3_column_text(st, 0));
-        e->kind   = strcmp((const char *)sqlite3_column_text(st, 1), "done") == 0
-                    ? KIND_DONE : KIND_SKIP;
-        e->ts     = sqlite3_column_int64(st, 2);
-        e->slot   = sqlite3_column_int64(st, 3);
-    }
-    sqlite3_finalize(st);
-}
-```
-
-**Retention** is one statement on boot instead of a key-scanning prune:
-
-```sql
-DELETE FROM events WHERE day < date('now', 'localtime', '-400 days');
-```
-
-400 days rather than 14, because the cost is negligible: roughly 30 events/day × ~100 bytes/row (a 36-char uuid, the other text columns, SQLite row overhead) is ~3KB/day, so 400 days is ~1.2MB against 16MB of flash. The number is "basically free," chosen to set up the historical queries in §13 without a later retention change, not because 400 is meaningful in itself.
 
 ## 4. Firmware architecture
 
@@ -1126,7 +1061,7 @@ Firmware first, because it is the product and it is the long pole. Each step sho
 0. **The design loop** — `design/` renders board screens at 368×448 and screenshots them headlessly (see `design/README.md`). Needs no hardware and no ESP-IDF, so design iteration is never blocked behind a toolchain. Settle what the screens look like here; §7 transcribes the result.
 1. **Board bring-up** — ESP-IDF project, display, touch, LVGL hello-world, WiFi, NTP-set RTC. Confirms the hardware and the toolchain before any product logic exists. First act: read the revision label (§1) and run the vendor demo that matches it — V1 and V2 take different display and touch drivers.
 2. **Config generation** — `actions.json` → `actions.g.h`, wired into the build with the CI diff check.
-3. **Storage** — LittleFS partition, SQLite, schema, `store_add_event` / `store_load_day`. Verifiable on its own with a serial console before any UI exists.
+3. **Storage** ✅ — LittleFS partition, `store_files.c`, `store_add_event` / `store_load_day`, benchmarked on the board (§3.4). `day_apply_event` still to come on top of it.
 4. **`derive`** ✅ — the walk, the anchor rule, the due window, and the §11.1 fixtures, all host-built and mutation-checked. `day_apply_event` still to come, on top of step 3. **This was the step to get right**; everything else is presentation.
 5. **Scheduler tick and the checklist card** (§6) — card logic ✅ (`card.c`, host-tested and mutation-checked); the 1 Hz tick that drives it lands with bring-up, and is testable on-desk by moving the RTC forward.
 6. **Grid UI** — tiles, dots, wash, header, the shared X component (§7.3a). First point at which the thing looks like itself.
@@ -1186,73 +1121,41 @@ Handled in the tick (§5.2), not on boot: the board runs for weeks at a time, so
 
 ---
 
-## 13. What SQLite buys
+## 13. History, and what the storage change costs
 
-The schema and the storage code are in §3.4. This section is why, and where the line is.
+This section used to be "What SQLite buys" and argued the case at length: dedupe as a constraint, retention as one `DELETE`, WAL surviving a power cut, history as queries. Spike S2 (§3.4) measured those claims on the board and two of them were false — WAL is unavailable on this port, and inserts ran at ~3s each before the database reached a tenth of its retention size. The section is kept, rewritten, rather than deleted, because the *reasoning* it contained is still the reasoning that applies: prefer the thing that removes code, and keep the data cheap enough that history stays possible.
 
-### 13.1 It removes code rather than adding it
+### 13.1 What actually carried over
 
-The model in §3.1 — an append-only log of uniquely-keyed rows — *is* relational. Storing it as packed blobs meant hand-writing the things a database already does. Two examples from earlier drafts of this plan, both now deleted:
+The load-bearing claim was never SQL, it was §3.1's model: an append-only log of uniquely-keyed events, with everything else derived. That model is untouched. What changed is only how bytes reach flash.
 
-| Was | Is |
+| Was going to be | Is |
 |---|---|
-| A linear scan over the events array to reject duplicates | `UNIQUE (action, slot)` + `INSERT OR IGNORE` |
-| A key-scanning prune of old day blobs | one `DELETE ... WHERE day < date(...)` |
+| `UNIQUE (action, slot)` in the schema | a scan of the open day in RAM (§3.4) — at most ~30 comparisons |
+| `DELETE FROM events WHERE day < …` | `unlink` per file, ISO names sorting lexically |
+| WAL surviving a power cut | `fsync` per line; a torn write loses at most the last line, never the file |
 
-The dedupe case is the one that matters most. It was the load-bearing invariant of the whole design — the thing that makes retries, double-taps and two clients safe — and it was enforced by a loop that a future edit could quietly break. As a constraint, the database refuses the duplicate no matter which code path reached it, including paths nobody has written yet.
-
-WAL mode is the other quiet win: a power cut mid-write on a battery-powered device leaves the last committed transaction intact rather than a half-written blob.
+The dedupe case is the one that got weaker and the one to watch. As a constraint the database refused a duplicate no matter which code path reached it, including paths nobody had written yet. As a loop it is enforced by code that a future edit could quietly break — which is precisely why `duplicate-event.json` and `replay-idempotent.json` (§11.1) exist and why they are mutation-checked.
 
 ### 13.2 Where the line is
 
-**`derive` stays in C. Do not move it into SQL.**
+Unchanged, and now trivially true: **storage holds facts, `derive` holds meaning.** There is no query language to be tempted by, so the temptation §13.2 used to warn about — pushing the slot walk into a recursive CTE — is gone with it. `derive` measured at 0.77ms over a full day on the board, against a 1 Hz tick.
 
-Counts and skips would translate fine — one `GROUP BY`. But `missed` and `next` need the slot walk, and §5.3's early-completion rule means slot *n+1* depends on the event that answered slot *n*. In SQL that is a recursive CTE joining each generated slot back against `events`, parameterised per action because the cadence lives in config:
+### 13.3 What history looks like now
 
-```sql
--- What NOT to write. Correct, and far harder to read than the C it replaces.
-WITH RECURSIVE slots(slot) AS (
-  SELECT :first_slot
-  UNION ALL
-  SELECT COALESCE((SELECT e.ts FROM events e
-                    WHERE e.action = :action AND e.slot = slots.slot AND e.kind = 'done'),
-                  slots.slot) + :every_sec
-  FROM slots WHERE slot < :work_end
-)
-SELECT COUNT(*) FROM slots WHERE ...
+Retention is still 400 days, because the data is still tiny: ~30 lines/day at ~50 bytes is ~1.5KB/day, so 400 days is ~600KB against a 10MB partition. History is accumulating from day one exactly as before; what changed is where the query runs.
+
+```sh
+# Water over the last 30 days — the files are the interface
+curl -s http://wfh.local/logs/days | tail -30 | while read d; do
+  printf "%s %s\n" "$d" "$(curl -s http://wfh.local/logs/$d | grep -c 'water\sdone')"
+done
 ```
 
-The rule: **the database holds facts, `derive` holds meaning.** Anything involving cadences, slots or working hours is scheduling semantics and belongs in the C. Anything that is counting or filtering rows belongs in SQL.
+That is a worse developer experience than one `GROUP BY` and a better one than nothing. The interesting question §13.3 raised — "you skip your 15:30 snack four days in five" is a fact about the schedule being wrong, not about the person — is still answerable, just on a laptop over pulled files rather than on the device.
 
-### 13.3 What it unlocks later
+Add `GET /logs/<day>` alongside the §8 debug endpoints when the time comes. Whether anything renders it is still a separate decision.
 
-Retention is 400 days (§3.4), so the data for history is accumulating from day one even though v1 renders only today. When historical views arrive they are queries, not a migration:
-
-```sql
--- Water over the last 30 days
-SELECT day, COUNT(*) AS n
-FROM events
-WHERE action = 'water' AND kind = 'done' AND day >= date('now','localtime','-30 days')
-GROUP BY day ORDER BY day;
-
--- Current streak of days where every action hit its target
-SELECT COUNT(*) FROM (
-  SELECT day FROM events WHERE kind = 'done'
-  GROUP BY day HAVING COUNT(DISTINCT action) = 7
-  ORDER BY day DESC
-);
-
--- Which action gets skipped most, and at what time of day
-SELECT action, strftime('%H', ts, 'unixepoch', 'localtime') AS hour, COUNT(*) AS n
-FROM events WHERE kind = 'skip'
-GROUP BY action, hour ORDER BY n DESC;
-```
-
-That last one is the interesting one, and it is the argument for keeping the data: "you skip your 15:30 snack four days in five" is a fact about the schedule being wrong, not about the person. A tracker that can notice that is worth more than one that only counts.
-
-Add `GET /history?from=&to=` alongside the §8 debug endpoints when the time comes. Whether anything renders it — an on-device week view, or the web version §8.2 leaves the door open to — is a separate decision to make then.
-
----
 
 ## 14. Device logs
 
@@ -1302,8 +1205,8 @@ Every call site that currently does `ESP_LOGx(...)` on something worth rememberi
 
 | # | Risk | Odds | Pain | Retired by |
 |---|---|---|---|---|
-| R1 | SQLite insert latency degrades with row count on LittleFS | medium | high | spike S2 |
-| R2 | Board in hand is V2 — different display + touch silicon than the V1 schematic this plan verified | high if buying now | medium | spike S1 |
+| R1 | ~~SQLite insert latency degrades on LittleFS~~ — **fired.** ~3s/insert at 688 rows, WAL unavailable. Kill switch taken: one append-only file per day (§3.4) | — | — | **closed by S2** |
+| R2 | ~~Board in hand is V2~~ — **closed.** The board is V1 (SH8601 + FT5x06, read from the factory firmware's strings) | — | — | **closed** |
 | R3 | AXP2101 rail/charging misconfig — dark panel, mistreated battery | medium | medium | spike S1 |
 | R4 | Codec/PA chain: silence, boot pop, idle hiss | medium | low | spike S3 |
 | R5 | Light sleep breaks a peripheral (touch wake, I2S after wake, tick cadence) | medium | medium | spike S3, §11 step 11 |
@@ -1349,7 +1252,7 @@ SQLite is not in the registry: vendor `nopnop2002/esp32-idf-sqlite3` (the IDF-5-
 ### 15.3 Three spikes, then the build order
 
 - **S1 — panel, touch, PMIC (half day).** Vendor demo for the revision in hand, then an LVGL hello-world against the pinned components with the PMIC rails configured from scratch. Retires R2, R3, and R7 (put the grain overlay in the hello-world).
-- **S2 — storage under load (half day).** `store_open` exactly as §3.4 (EXCLUSIVE + WAL, verified), then insert 15,000 events — a full retention window with margin — measuring per-insert latency at 1k / 5k / 15k. Pass is p99 < 50ms with `synchronous=FULL`. Retires or triggers R1's kill switch while the swap still costs nothing.
+- **S2 — storage under load (half day).** ✅ **Run, and it triggered the kill switch.** SQLite managed ~3s per insert at 688 rows with WAL unavailable; the file backend does 18.9ms p50, flat from 3k to 15k rows. Full numbers in §3.4. The stated pass bar was p99 < 50ms and the file backend does not meet it either — p99 is 558ms of flash garbage collection — but it does not degrade, which was the property that actually mattered. The residual p99 question is stated in §3.4 and left open deliberately.
 - **S3 — sound and sleep (half day).** `esp_codec_dev` beep through the PA gate (no boot pop, no idle hiss, silent when `PA_CTRL` is low), then auto light sleep on: confirm touch wakes the panel, I2S plays cleanly after wake, and the 1 Hz tick keeps cadence. Retires R4, most of R5.
 
 A failed spike changes the plan while the plan is still cheap to change. That is the entire budget: a day and a half before §11 step 1.
