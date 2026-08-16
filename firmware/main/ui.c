@@ -93,10 +93,14 @@ static void popup_refresh(void) {
     lv_obj_set_style_text_color(g_pop_sound, lv_color_hex(g_settings_sound ? 0xE6EDF3 : 0x5A636D), 0);
 }
 
-static void on_tile_cb(lv_event_t *e) {
-    g_popup_action = (int)(intptr_t)lv_event_get_user_data(e);
+void ui_show_popup(int action) {
+    g_popup_action = action;
     popup_refresh();
     lv_screen_load_anim(g_popup, LV_SCR_LOAD_ANIM_FADE_IN, 150, 0, false);
+}
+
+static void on_tile_cb(lv_event_t *e) {
+    ui_show_popup((int)(intptr_t)lv_event_get_user_data(e));
 }
 
 static void on_pop_done(lv_event_t *e)   { LV_UNUSED(e); if (g_popup_action >= 0) input_done(g_popup_action); ui_show_grid(); }
@@ -224,7 +228,10 @@ static void build_card(void) {
     lv_obj_set_style_text_color(title, lv_color_hex(0xe6edf3), 0);
     lv_obj_align(title, LV_ALIGN_TOP_LEFT, 16, 20);
 
-    for (int i = 0; i < ACTIONS_MAX; i++) {
+    // One row per action, not ACTIONS_MAX: the card can never hold more than
+    // the schedule has, and the surplus rows were laid out hundreds of pixels
+    // below a 448px screen.
+    for (int i = 0; i < g_settings.n_actions; i++) {
         lv_obj_t *row = lv_obj_create(g_card_scr);
         lv_obj_set_size(row, 336, 52);
         lv_obj_set_pos(row, 16, 68 + i * 58);
@@ -447,7 +454,7 @@ void ui_show_grid(void) {
 }
 
 void ui_show_card(void) {
-    for (int i = 0; i < ACTIONS_MAX; i++) {
+    for (int i = 0; i < g_settings.n_actions; i++) {
         if (i < g_card.len) {
             const int a = g_card.rows[i].action;
             lv_obj_clear_flag(g_rows[i], LV_OBJ_FLAG_HIDDEN);

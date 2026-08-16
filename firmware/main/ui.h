@@ -6,6 +6,7 @@ void ui_build(void);            // grid + card screens, once
 void ui_refresh(void);          // redraw tiles from g_view
 void ui_show_grid(void);
 void ui_show_card(void);
+void ui_show_popup(int action);
 void ui_sound_icon_update(void);
 
 /** The card's side effects, wired to input_* and the screens (§6). */
