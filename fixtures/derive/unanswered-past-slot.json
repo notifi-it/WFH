@@ -1,0 +1,17 @@
+{
+  "name": "unanswered-past-slot",
+  "why": "§3.2: unanswered and past splits two ways. At 10:30 the 09:40 slot's window closed at 10:20 so it is a miss; the 10:20 slot's window runs to 11:00 so it is still due, not yet a miss.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-08-13",
+  "now": "10:30",
+  "actions": [
+    { "id": "stand", "name": "Stand break", "target": 10, "priority": 1, "flow": "tap",
+      "cadence": { "kind": "interval", "everyMin": 40 } }
+  ],
+  "events": [],
+  "expect": {
+    "missed": { "stand": 1 },
+    "next": { "stand": "11:00" },
+    "due": ["stand"]
+  }
+}

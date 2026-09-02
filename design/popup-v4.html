@@ -1,0 +1,82 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WFH popup v4 — colour block (368×448)</title>
+<!--
+  The per-action full-screen page, in the v4c colour-block language:
+  the whole page bathes in the action's tint, the icon is the hero,
+  and three answers live at the bottom — Done (primary), Skip, +15m.
+  Shown for water. Everything is rects + alpha + text: board-renderable.
+-->
+<style id="fonts">
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-700.woff2") format("woff2"); font-weight: 700; }
+</style>
+<style>
+  :root { --tint: #6ec3e0; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 368px; height: 448px; overflow: hidden; }
+  body {
+    background: color-mix(in srgb, var(--tint) 13%, #0a0d11);
+    font: 500 14px/1.3 Geist, -apple-system, system-ui, sans-serif;
+    color: #e6edf3;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  /* Sound toggle (the icon is the state) and the close X. 44px targets. */
+  .sound { position: absolute; left: 8px; top: 8px; width: 44px; height: 44px;
+           display: grid; place-items: center; }
+  .sound svg { width: 20px; height: 20px; color: #e6edf3; opacity: .9; }
+  /* Top-left: this action's day (history-v4.html). Same 64px target as the X. */
+  .hist { position: absolute; left: 0; top: 0; width: 64px; height: 64px;
+          display: grid; place-items: center; color: #e6edf3; opacity: .9; }
+  .hist svg { width: 22px; height: 22px; }
+  .x { position: absolute; right: 0; top: 0; width: 64px; height: 64px;
+       display: grid; place-items: center; font-size: 26px; color: #e6edf3; opacity: .9; }
+
+  .icon { position: absolute; left: 50%; top: 68px; width: 88px; height: 88px;
+          transform: translateX(-50%); color: var(--tint); }
+
+  .name  { position: absolute; left: 0; right: 0; top: 166px;
+           text-align: center; font-size: 30px; font-weight: 700;
+           letter-spacing: -.02em; }
+  .blurb { position: absolute; left: 24px; right: 24px; top: 210px;
+           text-align: center; color: rgba(230, 237, 243, .62); }
+  /* Two facts, side by side: the slot you let pass (muted, only when there
+     is one) and the next one coming (tinted). A hairline splits them. */
+  .stats { position: absolute; left: 24px; right: 24px; top: 240px; height: 72px;
+           display: flex; align-items: stretch; }
+  .stat  { flex: 1; text-align: center; font-size: 36px; font-weight: 700;
+           letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+  .stat small { font-size: 14px; font-weight: 500; letter-spacing: 0;
+           color: rgba(230, 237, 243, .5); display: block; margin-bottom: 2px; }
+  .stat.missed { color: rgba(230, 237, 243, .62); }
+  .stat.next   { color: var(--tint); }
+  .stat + .stat { border-left: 1px solid rgba(230, 237, 243, .12); }
+  .stat .sub { display: block; font-size: 13px; font-weight: 500; letter-spacing: 0;
+           color: rgba(230, 237, 243, .45); margin-top: 2px; }
+  .done { position: absolute; left: 16px; right: 16px; bottom: 24px; height: 66px;
+          background: var(--tint); color: #0a0d11;
+          border-radius: 16px; display: grid; place-items: center;
+          font-size: 17px; font-weight: 700; }
+  .row  { position: absolute; left: 16px; right: 16px; bottom: 16px; height: 56px;
+          display: flex; gap: 8px; }
+  .row > div {
+          flex: 1; background: rgba(255, 255, 255, .08);
+          border-radius: 14px; display: grid; place-items: center;
+          font-size: 15px; font-weight: 500; color: rgba(230, 237, 243, .85);
+          font-variant-numeric: tabular-nums; }
+</style>
+
+<!-- mingcute:glass-cup-line -->
+<svg class="icon" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 9s2.5-1 6 .5s6 .5 6 .5m-8 3h.002M13 16h.002m3.103 5h-8.21a1 1 0 0 1-.994-.89L5.061 3.555A.5.5 0 0 1 5.56 3h12.88a.5.5 0 0 1 .497.555l-1.84 16.555a1 1 0 0 1-.993.89"/></svg>
+
+<div class="name">Water</div>
+<div class="blurb">Glass of water. Refill while you are up.</div>
+<div class="stats">
+  <div class="stat missed"><small>missed</small>11:15<span class="sub">snoozed to 12:37</span></div>
+  <div class="stat next"><small>next</small>12:00</div>
+</div>
+
+<!-- Guided actions (stretches, shoulder roll) read "Start" here and open the timer flow; the flow logs the done. -->
+<div class="done">Done</div>

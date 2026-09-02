@@ -1,0 +1,19 @@
+{
+  "name": "fixed-done-early",
+  "why": "§5.3: a fixed action must NOT re-anchor. Lunch eaten at 12:40 answers the 13:00 slot and the day is done with lunch. Anchoring here would walk back to 13:00 forever, so this guards a hang as well as a miscount.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-08-13",
+  "now": "12:45",
+  "actions": [
+    { "id": "lunch", "name": "Lunch", "target": 1, "priority": 2, "flow": "tap",
+      "cadence": { "kind": "fixed", "times": ["13:00"] } }
+  ],
+  "events": [
+    { "action": "lunch", "kind": "done", "ts": "12:40", "slot": "13:00" }
+  ],
+  "expect": {
+    "counts": { "lunch": 1 },
+    "nextNone": ["lunch"],
+    "due": []
+  }
+}

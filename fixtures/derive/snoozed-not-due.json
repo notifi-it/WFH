@@ -1,0 +1,18 @@
+{
+  "name": "snoozed-not-due",
+  "why": "§6 Delay-all: a snoozed action inside its window is neither due nor missed — it is quietly deferred. The earlier slot, whose window already closed, is still a miss; snoozing does not retroactively forgive it.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-08-13",
+  "now": "10:30",
+  "actions": [
+    { "id": "stand", "name": "Stand break", "target": 10, "priority": 1, "flow": "tap",
+      "cadence": { "kind": "interval", "everyMin": 40 } }
+  ],
+  "events": [],
+  "snoozedUntil": { "stand": "10:45" },
+  "expect": {
+    "missed": { "stand": 1 },
+    "next": { "stand": "11:00" },
+    "due": []
+  }
+}

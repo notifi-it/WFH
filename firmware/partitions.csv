@@ -1,0 +1,6 @@
+# 16MB flash — §15.2. No OTA pair: settings changes are a reflash (§2.1).
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   24K
+phy_init,   data, phy,      0xf000,   4K
+factory,    app,  factory,  0x10000,  4M
+storage,    data, littlefs, ,         10M

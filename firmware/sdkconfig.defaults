@@ -1,0 +1,53 @@
+# Waveshare ESP32-S3-Touch-AMOLED-1.8 — ESP32-S3R8, 16MB flash, 8MB octal PSRAM
+CONFIG_IDF_TARGET="esp32s3"
+
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+# QEMU has no PSRAM model — boot anyway instead of aborting (real board unaffected).
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+
+# LittleFS mount recurses through lfs_dir_fetchmatch and needs far more than
+# the 3584-byte default. Overflowing it corrupts whatever sits after the
+# stack, which surfaces as an unrelated assert inside the flash mutex.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
+
+# Task watchdog window; the default is 5s.
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+CONFIG_LV_FONT_MONTSERRAT_14=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# The QSPI panel is fed by DMA, and the framebuffer is cache-backed. Waveshare
+# set this in every one of their examples and the S1 spike inherited it; the
+# app project did not, and the screen rendered as smeared vertical bars — the
+# washes stretched across the panel — while every log line still said the
+# display was up. Framebuffer corruption reports nothing.
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+CONFIG_LV_USE_SNAPSHOT=y
+CONFIG_WFH_DUMP_FRAMEBUFFER=y
+
+# The framebuffer dump goes out over the USB-Serial/JTAG port. As the
+# *secondary* console that path is best-effort — it silently drops bytes
+# whenever its 64-byte FIFO backs up, which shears every capture. As the
+# primary console, writes block until the host drains the FIFO.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_36=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+
+# The panel's DMA draw buffer must live in internal RAM (see main.c); 50 rows
+# is 36.8KB, and WiFi/lwIP buffers go to PSRAM so they do not compete for it.
+CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=50
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Sub-pixel line coordinates: the waterline is a polyline, and on integer
+# points its crest steps in whole pixels.
+CONFIG_LV_USE_FLOAT=y

@@ -1,0 +1,11 @@
+menu "WFH"
+    config WFH_DUMP_FRAMEBUFFER
+        bool "Dump the framebuffer over serial at boot"
+        default n
+        help
+            Snapshots what LVGL rendered and prints it as base64, for
+            tools/grab-screen.sh to turn back into a PNG. A display can be
+            wrong in two places — LVGL drew it wrong, or the panel received
+            it wrong — and from outside the board those look identical.
+            Off by default: it costs 2.5s of boot and a lot of serial.
+endmenu

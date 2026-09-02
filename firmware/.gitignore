@@ -1,0 +1,7 @@
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+components/sqlite3/
+dependencies.lock
+main/wifi.g.h

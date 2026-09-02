@@ -1,0 +1,263 @@
+// Spikes S1 + S3 (§15.3): panel, touch, PMIC rails, and the sound path.
+//
+// Deliberately not lv_demo_widgets(): this draws the §7 layout at real size
+// on the real panel, so what gets judged is whether the design reads at
+// 368x448 — the thing the design/ loop can only approximate. Tapping a tile
+// fires the §9 cue that tile would fire in the product.
+#include <stdio.h>
+
+#include "bsp/esp-bsp.h"
+#include "driver/i2c_master.h"
+#include "esp_io_expander.h"
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "lvgl.h"
+
+#include "audio.h"
+
+static const char *TAG = "s1";
+
+#define V2_TOUCH_ADDR 0x15        // CST820; absent on a V1 (FT3168) board
+
+static lv_obj_t *g_readout;
+static int       g_taps;
+
+// Real cadences from config/actions.json. The spike runs a compressed clock
+// so a 40-minute fill is watchable; the *update rate* stays 1 Hz, exactly
+// what §5.2's tick does, so the frame cost measured here is the real one.
+#define TIME_SPEEDUP 60
+
+typedef struct {
+    const char *name;
+    uint32_t    tint;
+    int         every_min;
+    const char *dots;
+    lv_obj_t   *tile;
+    lv_obj_t   *wash;
+    lv_obj_t   *countdown;
+} tile_t;
+
+static tile_t TILES[] = {
+    { "Stand break",   0x7fd4a8, 40, "4 of 10" },
+    { "Water",         0x6ec3e0, 45, "3 of 8"  },
+    { "Shoulder roll", 0xb6a3e8, 60, "2 of 8"  },
+    { "Snack",         0xe8b06a, 25, "1 of 2"  },
+    { "Lunch",         0xe8926a, 90, "0 of 1"  },
+    { "Stretches",     0xe0d16a, 55, "1 of 2"  },
+};
+
+#define TILE_W 172
+#define TILE_H 104
+
+static void on_tile(lv_event_t *e) {
+    const tile_t *t = lv_event_get_user_data(e);
+
+    lv_indev_t *indev = lv_indev_active();
+    lv_point_t p = { 0, 0 };
+    if (indev) lv_indev_get_point(indev, &p);
+
+    g_taps++;
+    ESP_LOGI(TAG, "tap #%d on '%s' at (%d, %d)", g_taps, t->name, (int)p.x, (int)p.y);
+    lv_label_set_text_fmt(g_readout, "%s  (%d,%d)  #%d", t->name, (int)p.x, (int)p.y, g_taps);
+
+    audio_cue(g_taps % 2 ? CUE_SUCCESS : CUE_BLOOM);
+}
+
+static void build_screen(void) {
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_set_style_bg_color(scr, lv_color_hex(0x0d1117), 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Header — 80px, per §7.
+    lv_obj_t *hdr = lv_obj_create(scr);
+    lv_obj_set_size(hdr, 368, 80);
+    lv_obj_set_pos(hdr, 0, 0);
+    lv_obj_set_style_bg_color(hdr, lv_color_hex(0x161b22), 0);
+    lv_obj_set_style_border_width(hdr, 0, 0);
+    lv_obj_set_style_radius(hdr, 0, 0);
+    lv_obj_clear_flag(hdr, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t *clock = lv_label_create(hdr);
+    lv_label_set_text(clock, "14:32");
+    lv_obj_set_style_text_font(clock, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(clock, lv_color_hex(0xe6edf3), 0);
+    lv_obj_align(clock, LV_ALIGN_LEFT_MID, 4, -8);
+
+    lv_obj_t *date = lv_label_create(hdr);
+    lv_label_set_text(date, "Thu 13 Aug");
+    lv_obj_set_style_text_color(date, lv_color_hex(0x8b949e), 0);
+    lv_obj_align(date, LV_ALIGN_LEFT_MID, 4, 14);
+
+    lv_obj_t *snd = lv_label_create(hdr);
+    lv_label_set_text(snd, LV_SYMBOL_VOLUME_MAX);
+    lv_obj_set_style_text_font(snd, &lv_font_montserrat_24, 0);
+    lv_obj_set_style_text_color(snd, lv_color_hex(0xe6edf3), 0);
+    lv_obj_align(snd, LV_ALIGN_RIGHT_MID, -12, 0);
+
+    // 2-column grid in the 368x368 square below the header.
+    for (int i = 0; i < (int)(sizeof TILES / sizeof TILES[0]); i++) {
+        lv_obj_t *tile = lv_obj_create(scr);
+        lv_obj_set_size(tile, TILE_W, TILE_H);
+        lv_obj_set_pos(tile, (i % 2) * 184 + 6, 88 + (i / 2) * 112);
+        lv_obj_set_style_bg_color(tile, lv_color_hex(0x161b22), 0);
+        lv_obj_set_style_border_color(tile, lv_color_hex(TILES[i].tint), 0);
+        lv_obj_set_style_border_width(tile, 2, 0);
+        lv_obj_set_style_radius(tile, 14, 0);
+        lv_obj_set_style_pad_all(tile, 0, 0);
+        lv_obj_set_style_clip_corner(tile, true, 0);
+        lv_obj_clear_flag(tile, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(tile, on_tile, LV_EVENT_CLICKED, (void *)&TILES[i]);
+        TILES[i].tile = tile;
+
+        // §7.1: the countdown *is* a slow tinted wash rising from the bottom.
+        // Gradient rather than a flat block so the leading edge is a soft
+        // boundary — a hard line reads as a progress bar, which is the wrong
+        // register for something that should sit quietly in peripheral vision.
+        lv_obj_t *wash = lv_obj_create(tile);
+        lv_obj_set_width(wash, LV_PCT(100));
+        lv_obj_set_height(wash, 0);
+        lv_obj_set_style_border_width(wash, 0, 0);
+        lv_obj_set_style_radius(wash, 0, 0);
+        lv_obj_set_style_pad_all(wash, 0, 0);
+        lv_obj_set_style_bg_color(wash, lv_color_hex(TILES[i].tint), 0);
+        lv_obj_set_style_bg_grad_color(wash, lv_color_hex(0x161b22), 0);
+        lv_obj_set_style_bg_grad_dir(wash, LV_GRAD_DIR_VER, 0);
+        lv_obj_set_style_bg_main_stop(wash, 255, 0);      // tint at the bottom
+        lv_obj_set_style_bg_grad_stop(wash, 0, 0);        // fading upward
+        lv_obj_set_style_bg_opa(wash, LV_OPA_40, 0);
+        lv_obj_clear_flag(wash, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_align(wash, LV_ALIGN_BOTTOM_MID, 0, 0);
+        TILES[i].wash = wash;
+
+        lv_obj_t *name = lv_label_create(tile);
+        lv_label_set_text(name, TILES[i].name);
+        lv_obj_set_style_text_color(name, lv_color_hex(TILES[i].tint), 0);
+        lv_obj_align(name, LV_ALIGN_TOP_LEFT, 8, 8);
+
+        lv_obj_t *dots = lv_label_create(tile);
+        lv_label_set_text(dots, TILES[i].dots);
+        lv_obj_set_style_text_color(dots, lv_color_hex(0x8b949e), 0);
+        lv_obj_align(dots, LV_ALIGN_BOTTOM_LEFT, 8, -8);
+
+        lv_obj_t *cd = lv_label_create(tile);
+        lv_label_set_text(cd, "--m");
+        lv_obj_set_style_text_font(cd, &lv_font_montserrat_24, 0);
+        lv_obj_set_style_text_color(cd, lv_color_hex(0xe6edf3), 0);
+        lv_obj_align(cd, LV_ALIGN_BOTTOM_RIGHT, -8, -8);
+        TILES[i].countdown = cd;
+    }
+
+    g_readout = lv_label_create(scr);
+    lv_label_set_text(g_readout, "tap a tile");
+    lv_obj_set_style_text_color(g_readout, lv_color_hex(0x8b949e), 0);
+    lv_obj_align(g_readout, LV_ALIGN_BOTTOM_MID, 0, -6);
+}
+
+/** The §5.2 tick, at the rate the product runs it. Measures its own cost:
+ *  R7 asks whether the wash fits the frame budget, and the honest answer is
+ *  how long seven of these take, not how it looks. */
+static void tick_cb(lv_timer_t *timer) {
+    LV_UNUSED(timer);
+    static uint32_t ticks;
+    static uint64_t total_us;
+
+    const int64_t t0 = esp_timer_get_time();
+    const uint32_t virt = (uint32_t)(t0 / 1000000) * TIME_SPEEDUP;
+
+    for (int i = 0; i < (int)(sizeof TILES / sizeof TILES[0]); i++) {
+        const uint32_t interval = (uint32_t)TILES[i].every_min * 60;
+        const uint32_t into     = virt % interval;
+        const uint32_t left     = interval - into;
+
+        // Against the *content* height, not TILE_H: the border insets the
+        // content box, so scaling by the nominal size both stops short of the
+        // bottom and saturates before the countdown reaches zero.
+        const int32_t box = lv_obj_get_content_height(TILES[i].tile);
+        lv_obj_set_height(TILES[i].wash, (int32_t)((int64_t)box * into / interval));
+        lv_obj_align(TILES[i].wash, LV_ALIGN_BOTTOM_MID, 0, 0);
+        lv_label_set_text_fmt(TILES[i].countdown, "%" LV_PRIu32 "m", (left + 59) / 60);
+    }
+
+    total_us += (uint64_t)(esp_timer_get_time() - t0);
+    if (++ticks % 15 == 0) {
+        ESP_LOGI(TAG, "tick %" LV_PRIu32 ": %llu us mean to update 7 washes",
+                 ticks, total_us / ticks);
+    }
+}
+
+/** Who is actually on the bus. Worth printing before anything depends on it:
+ *  "touch not found" and "touch held in reset" produce identical errors from
+ *  the driver, and only a scan tells them apart. */
+static void i2c_scan(const char *when) {
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
+    printf("  i2c scan (%s):", when);
+    for (uint8_t a = 0x08; a < 0x78; a++) {
+        if (i2c_master_probe(bsp_i2c_get_handle(), a, 50) == ESP_OK) printf(" 0x%02X", a);
+    }
+    printf("\n");
+    esp_log_level_set("i2c.master", ESP_LOG_INFO);
+}
+
+void app_main(void) {
+    printf("\n=== S1/S3: panel, touch, sound ===\n");
+
+    ESP_ERROR_CHECK(bsp_i2c_init());
+    i2c_scan("before expander");
+
+    // Three panel-critical lines hang off the TCA9554, and the V1 BSP creates
+    // the expander handle without ever driving a pin. Until something does,
+    // the panel has no VCI and both controllers sit in reset — which looks
+    // exactly like working init, because every SPI write "succeeds" into a
+    // display that is not powered.
+    //   EXIO0 = LCD_RESET, EXIO1 = DSI_PWR_EN, EXIO2 = TP_RESET
+    esp_io_expander_handle_t exp = bsp_io_expander_init();
+    if (!exp) { ESP_LOGE(TAG, "io expander init failed"); return; }
+
+    const uint32_t PANEL_PINS = IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_1 | IO_EXPANDER_PIN_NUM_2;
+    ESP_ERROR_CHECK(esp_io_expander_set_dir(exp, PANEL_PINS, IO_EXPANDER_OUTPUT));
+
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_1, 1);      // panel power on
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_2, 0);   // both in reset
+    vTaskDelay(pdMS_TO_TICKS(20));
+    esp_io_expander_set_level(exp, IO_EXPANDER_PIN_NUM_0 | IO_EXPANDER_PIN_NUM_2, 1);   // release
+    vTaskDelay(pdMS_TO_TICKS(120));
+
+    i2c_scan("after panel power + resets");
+
+    lv_display_t *disp = bsp_display_start();
+    if (!disp) { ESP_LOGE(TAG, "display start failed — PMIC rails or panel driver"); return; }
+    ESP_ERROR_CHECK(bsp_display_brightness_set(85));
+    ESP_LOGI(TAG, "panel up: %dx%d", (int)lv_display_get_horizontal_resolution(disp),
+             (int)lv_display_get_vertical_resolution(disp));
+
+    // Independent confirmation of the revision: V2 answers on the CST820
+    // address, V1 does not. Cross-checks the strings read from the factory
+    // firmware, using a completely different signal.
+    esp_log_level_set("i2c.master", ESP_LOG_NONE);
+    const bool v2 = i2c_master_probe(bsp_i2c_get_handle(), V2_TOUCH_ADDR, 100) == ESP_OK;
+    esp_log_level_set("i2c.master", ESP_LOG_INFO);
+    ESP_LOGI(TAG, "touch probe says board is %s", v2 ? "V2 (CO5300/CST820)" : "V1 (SH8601/FT3168)");
+
+    if (bsp_display_lock(0)) {
+        build_screen();
+        lv_timer_create(tick_cb, 1000, NULL);      // §5.2's 1 Hz tick
+        bsp_display_unlock();
+    }
+
+    if (audio_init(70) == ESP_OK) {
+        vTaskDelay(pdMS_TO_TICKS(300));
+        ESP_LOGI(TAG, "playing bloom (prompt), success (logged), ready (stretch step)");
+        audio_cue(CUE_BLOOM);   vTaskDelay(pdMS_TO_TICKS(500));
+        audio_cue(CUE_SUCCESS); vTaskDelay(pdMS_TO_TICKS(500));
+        audio_cue(CUE_READY);
+    } else {
+        ESP_LOGE(TAG, "audio init failed");
+    }
+
+    printf("=== ready: tap tiles, each logs coords and plays a cue ===\n");
+    for (;;) vTaskDelay(pdMS_TO_TICKS(5000));
+}

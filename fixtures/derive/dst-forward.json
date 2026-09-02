@@ -1,0 +1,13 @@
+{
+  "name": "dst-forward",
+  "why": "2026-03-29 is the UK spring-forward Sunday (01:00 GMT becomes 02:00 BST). The working day is entirely inside BST, so every slot must land at its authored WALL-CLOCK time — an hour earlier in UTC than the day before. The epochs below are computed by hand, not taken from the code, so this is a real anchor rather than a mirror.",
+  "tz": "GMT0BST,M3.5.0/1,M10.5.0",
+  "date": "2026-03-29",
+  "now": "09:30",
+  "events": [],
+  "expect": {
+    "next": { "stand": "09:40", "water": "09:45", "roll": "10:00", "lunch": "13:00" },
+    "nextEpoch": { "stand": 1774773600, "lunch": 1774785600 },
+    "due": []
+  }
+}
