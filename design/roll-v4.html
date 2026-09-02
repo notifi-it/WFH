@@ -1,0 +1,73 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>WFH shoulder roll — 368×448</title>
+<!--
+  Guided flow screen (PLAN §7.6), v4 colour-block language. One step per
+  screen: a countdown ring with the seconds remaining in the middle,
+  auto-advancing at zero. Shown: the single roll step waiting on Start; the timer finishing logs the done.
+  Ring = LVGL arc widget; everything else rects + text. Board-renderable.
+-->
+<style id="fonts">
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-700.woff2") format("woff2"); font-weight: 700; }
+</style>
+<style>
+  :root { --tint: #b6a3e8; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 368px; height: 448px; overflow: hidden; }
+  body {
+    background: color-mix(in srgb, var(--tint) 13%, #0a0d11);
+    font: 500 14px/1.3 Geist, -apple-system, system-ui, sans-serif;
+    color: #e6edf3;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+  }
+
+  .steps { position: absolute; left: 16px; top: 20px; display: flex; gap: 5px; }
+  .step  { width: 18px; height: 4px; border-radius: 4px;
+            background: rgba(255,255,255,.14); }
+  .step.on   { background: var(--tint); }
+  .step.past { background: color-mix(in srgb, var(--tint) 45%, transparent); }
+
+  .x { position: absolute; right: 0; top: 0; width: 64px; height: 64px;
+        display: grid; place-items: center; font-size: 26px; opacity: .9; }
+
+  .ring { position: absolute; left: 50%; top: 36px; width: 160px; height: 160px;
+           transform: translateX(-50%) rotate(-90deg); }
+  .ring circle { fill: none; stroke-width: 7; stroke-linecap: round; }
+  .ring .track { stroke: rgba(255,255,255,.10); }
+  .ring .prog  { stroke: var(--tint); }
+
+  /* Same box as the ring, content flex-centred, so the number and its
+     "seconds" label sit dead centre of the circle as one group. */
+  .secs { position: absolute; left: 50%; top: 36px; width: 160px; height: 160px;
+           transform: translateX(-50%);
+           display: flex; flex-direction: column; justify-content: center;
+           text-align: center; font-size: 52px; font-weight: 700; line-height: 1;
+           letter-spacing: -.03em; font-variant-numeric: tabular-nums; }
+
+  .name { position: absolute; left: 0; right: 0; top: 216px;
+           text-align: center; font-size: 24px; font-weight: 700;
+           letter-spacing: -.02em; }
+  .cue  { position: absolute; left: 32px; right: 32px; top: 252px;
+           text-align: center; color: rgba(230,237,243,.62); }
+
+  .primary { position: absolute; left: 16px; right: 16px; bottom: 16px; height: 66px;
+           background: var(--tint); color: #0a0d11;
+           border-radius: 16px; display: grid; place-items: center;
+           font-size: 17px; font-weight: 700; }
+</style>
+
+<div class="steps"><i class="step on"></i></div>
+<div class="x">✕</div>
+
+<svg class="ring" viewBox="0 0 200 200">
+      <circle cx="100" cy="100" r="88" class="track"/>
+      <circle cx="100" cy="100" r="88" class="prog" stroke-dasharray="553 553"/>
+    </svg>
+<div class="secs">30</div>
+
+<div class="name">Shoulder roll</div>
+<div class="cue">Ten slow rolls back, then drop the shoulders.</div>
+
+<div class="primary">Start</div>

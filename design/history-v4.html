@@ -1,0 +1,96 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>history-v4</title>
+<!--
+  One action's day: every slot of that action in order, what happened to
+  it, and an Undo on the ones already answered — a tap logged in the wrong
+  moment should be one tap to take back. Opened from the top-left of that
+  action's popup, where the sound icon used to be. Tinted like the popup so
+  it reads as the same action. #water shows a busy one.
+-->
+<style>
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-700.woff2") format("woff2"); font-weight: 700; }
+  html, body { margin: 0; background: #000; }
+  body { width: 368px; height: 448px; overflow: hidden; position: relative;
+         background: #0a0d11; color: #e6edf3;
+         font: 500 14px/1.3 Geist, -apple-system, system-ui, sans-serif; }
+  .head  { position: absolute; left: 16px; top: 20px; display: flex; align-items: center; gap: 12px; }
+  .head .ic { width: 36px; height: 36px; color: var(--tint); flex: none; }
+  .title { font-size: 28px; font-weight: 700; letter-spacing: -.02em; line-height: 1; }
+  .title small { display: block; font-size: 13px; font-weight: 500; letter-spacing: 0;
+           color: rgba(230,237,243,.45); margin-top: 6px; }
+  .x { position: absolute; right: 0; top: 0; width: 64px; height: 64px;
+       display: grid; place-items: center; font-size: 26px; opacity: .9; }
+
+  /* The feed scrolls; the head does not. Past above the "now" rule,
+     upcoming below it, dimmed. */
+  .feed { position: absolute; left: 0; right: 0; top: 80px; bottom: 0;
+          overflow-y: auto; padding: 0 16px 16px; }
+  .row  { height: 52px; display: flex; align-items: center; gap: 12px;
+          border-bottom: 1px solid rgba(230,237,243,.06); }
+  .t    { width: 56px; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; flex: none; }
+  .name { flex: 1; font-size: 13px; color: rgba(230,237,243,.55); }
+  .mark { width: 22px; height: 22px; border-radius: 99px; flex: none; display: grid; place-items: center; }
+  .mark svg { width: 12px; height: 12px; stroke: #0a0d11; }
+  .mark.done { background: var(--tint); }
+  .mark.skip { background: #6e7681; }
+  .mark.miss { border: 2px solid rgba(230,237,243,.3); box-sizing: border-box; }
+  .mark.open { border: 2px solid var(--tint); box-sizing: border-box; }
+  .mark.up   { background: #2c343e; width: 10px; height: 10px; margin: 0 6px; }
+  .row.open .t { color: var(--tint); }
+  .row.miss .t { color: rgba(230,237,243,.55); }
+  .row.up { opacity: .4; }
+
+  /* Undo is a quiet pill; the row's mark stays so you can see what you are
+     undoing. Tapping it puts the slot back to open (or missed if its window
+     has closed) and drops the pill. */
+  .undo { font: inherit; font-size: 13px; color: rgba(230,237,243,.85);
+          background: rgba(255,255,255,.08); border: 0; border-radius: 10px;
+          height: 34px; padding: 0 14px; flex: none; }
+
+  .now  { height: 28px; display: flex; align-items: center; gap: 10px;
+          font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+  .now::before, .now::after { content: ""; flex: 1; height: 1px; background: rgba(230,237,243,.18); }
+  .now span { color: rgba(230,237,243,.6); }
+</style>
+
+<div id="snack">
+<div class="head" style="--tint:#e8b06a">
+  <svg class="ic" viewBox="0 0 24 24"><path fill="currentColor" d="M10 9.5a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0m0 6a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0m6-2a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0"/><path fill="none" stroke="currentColor" stroke-width="2" d="M17 7a.125.125 0 0 0-.16-.12A3 3 0 0 1 13 4c0-.49-.304-.987-.794-.998L12 3a9 9 0 1 0 8.9 7.653c-.062-.414-.481-.653-.9-.653a3 3 0 0 1-3-3Z"/></svg>
+  <div class="title">Snack<small>0 of 2 today</small></div>
+</div>
+<div class="x">✕</div>
+<div class="feed" style="--tint:#e8b06a">
+  <div class="row open"><span class="t">10:45</span><span class="name">open — snoozed to 12:37</span><span class="mark open"></span></div>
+  <div class="now"><span>now 12:20</span></div>
+  <div class="row up"><span class="t">15:30</span><span class="name">upcoming</span><span class="mark up"></span></div>
+</div>
+</div>
+<div id="water" hidden>
+<div class="head" style="--tint:#6ec3e0">
+  <svg class="ic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 9s2.5-1 6 .5s6 .5 6 .5m-8 3h.002M13 16h.002m3.103 5h-8.21a1 1 0 0 1-.994-.89L5.061 3.555A.5.5 0 0 1 5.56 3h12.88a.5.5 0 0 1 .497.555l-1.84 16.555a1 1 0 0 1-.993.89"/></svg>
+  <div class="title">Water<small>2 of 8 today</small></div>
+</div>
+<div class="x">✕</div>
+<div class="feed" style="--tint:#6ec3e0">
+  <div class="row done"><span class="t">09:45</span><span class="name">done at 09:51</span><button class="undo">Undo</button><span class="mark done"><svg viewBox="0 0 14 14"><path d="M2 7.5 5.5 11 12 3" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div>
+  <div class="row done"><span class="t">10:30</span><span class="name">done at 10:29</span><button class="undo">Undo</button><span class="mark done"><svg viewBox="0 0 14 14"><path d="M2 7.5 5.5 11 12 3" fill="none" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span></div>
+  <div class="row skip"><span class="t">11:15</span><span class="name">skipped at 11:20</span><button class="undo">Undo</button><span class="mark skip"><svg viewBox="0 0 14 14"><path d="M3 3l8 8M11 3l-8 8" fill="none" stroke-width="2.5" stroke-linecap="round"/></svg></span></div>
+  <div class="row open"><span class="t">12:00</span><span class="name">open</span><span class="mark open"></span></div>
+  <div class="now"><span>now 12:20</span></div>
+  <div class="row up"><span class="t">12:45</span><span class="name">upcoming</span><span class="mark up"></span></div>
+  <div class="row up"><span class="t">13:30</span><span class="name">upcoming</span><span class="mark up"></span></div>
+  <div class="row up"><span class="t">14:15</span><span class="name">upcoming</span><span class="mark up"></span></div>
+  <div class="row up"><span class="t">15:00</span><span class="name">upcoming</span><span class="mark up"></span></div>
+  <div class="row up"><span class="t">15:45</span><span class="name">upcoming</span><span class="mark up"></span></div>
+  <div class="row up"><span class="t">16:30</span><span class="name">upcoming</span><span class="mark up"></span></div>
+  <div class="row up"><span class="t">17:15</span><span class="name">upcoming</span><span class="mark up"></span></div>
+</div>
+</div>
+<script>
+  if (location.hash === "#water") {
+    document.getElementById("snack").hidden = true;
+    document.getElementById("water").hidden = false;
+  }
+</script>
