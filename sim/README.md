@@ -3,8 +3,12 @@
 Runs the **real firmware UI** on the laptop and writes a PNG.
 
 ```bash
-make -C sim grid     # sim/grid.png
-make -C sim popup    # sim/popup.png
+make -C sim grid       # sim/grid.png      the grid
+make -C sim popup      # sim/popup.png     the action popup (water)
+make -C sim card       # sim/card.png      the checklist card, four rows, two ticked
+make -C sim stretch    # sim/stretch.png   the guided stretch flow
+make -C sim rollflow   # sim/rollflow.png  the single-step flow (shoulder roll)
+make -C sim history    # sim/history.png   one action's day (water)
 ```
 
 It compiles `firmware/main/ui.c` unchanged against a memory display instead of
@@ -18,7 +22,7 @@ There were three ways to look at this UI and each lied differently:
 | | shows | lies about |
 |---|---|---|
 | `design/*.html` | what the design *should* be | what the firmware actually draws |
-| `tools/grab-screen.sh` | the board's own framebuffer | **colour** — it decodes wrongly, and cost hours of chasing bands that were never on the panel |
+| `tools/grab-screen.sh` | the board's own framebuffer | nothing, if it prints `clean`; a capture that reports dropped rows is not evidence of anything |
 | this | what the firmware draws, in correct colour | nothing much, but it is not the panel |
 
 The capture tool is still useful for confirming the board is running what you
@@ -27,8 +31,10 @@ think it is. For "does this look right", use this.
 ## What is stubbed
 
 `derive`, storage and inputs — the question here is what the screen looks like,
-and `derive` has its own host tests. `sim/main.c` fakes a mid-afternoon day
-chosen to exercise every dot state and a range of wash heights.
+and `derive` has its own host tests. `sim/main.c` fakes a late morning at
+12:20, chosen to exercise every dot state and a range of wash heights, with
+a full timeline for water (done, done, skipped, open) so the history screen
+has something to show.
 
 ## Gotchas paid for already
 

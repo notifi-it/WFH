@@ -50,13 +50,35 @@ time_t wfh_window_close(const action_def_t *def, time_t slot, const settings_t *
     return wfh_at_time(&day, s->work_end) + (time_t)s->grace_min * 60;
 }
 
-static const log_event_t *find_event(const day_log_t *log, int action, time_t slot) {
+const log_event_t *wfh_latest_event(const day_log_t *log, int action, time_t slot) {
+    const log_event_t *last = NULL;
     for (int i = 0; i < log->events_len; i++) {
-        if (log->events[i].action == action && log->events[i].slot == slot) {
-            return &log->events[i];        // (action, slot) is unique — §3.4
-        }
+        if (log->events[i].action == action && log->events[i].slot == slot) last = &log->events[i];
     }
-    return NULL;
+    return last;
+}
+
+const char *wfh_kind_name(event_kind_t k) {
+    switch (k) {
+    case KIND_DONE: return "done";
+    case KIND_SKIP: return "skip";
+    case KIND_UNDO: return "undo";
+    }
+    return "skip";
+}
+
+bool wfh_kind_parse(const char *name, event_kind_t *out) {
+    if (strcmp(name, "done") == 0) { *out = KIND_DONE; return true; }
+    if (strcmp(name, "skip") == 0) { *out = KIND_SKIP; return true; }
+    if (strcmp(name, "undo") == 0) { *out = KIND_UNDO; return true; }
+    return false;
+}
+
+/** The slot's answer, or NULL if it has none. An undo as the latest word
+ *  means the slot was never answered (§3.4). */
+static const log_event_t *find_event(const day_log_t *log, int action, time_t slot) {
+    const log_event_t *last = wfh_latest_event(log, action, slot);
+    return last && last->kind != KIND_UNDO ? last : NULL;
 }
 
 /** Priority descending, insertion sort because it is stable: ties must keep
@@ -88,27 +110,39 @@ void wfh_derive(const day_log_t *log, time_t now, const settings_t *s, day_view_
 
         for (int guard = 0; slot > 0 && guard < SLOT_WALK_MAX; guard++) {
             const log_event_t *ev = find_event(log, a, slot);
+            slot_state_t state;
 
             if (ev && ev->kind == KIND_DONE) {
                 out->counts[a]++;
+                state = SLOT_DONE;
                 if (def->cadence.kind == CADENCE_INTERVAL) anchor = ev->ts;   // §5.3
             } else if (ev && ev->kind == KIND_SKIP) {
                 out->skipped[a]++;
+                state = SLOT_SKIP;
             } else if (slot <= now) {
                 // Unanswered and in the past: due while its window is open,
                 // missed once it closes. A snooze defers due-ness inside the
                 // window without making it a miss — §3.2.
                 if (now < wfh_window_close(def, slot, s)) {
+                    state = SLOT_DUE;
+                    out->open_slot[a] = slot;
                     if (log->snoozed_until[a] <= now) {
                         out->due[out->n_due]        = a;
                         out->due_slot[out->n_due++] = slot;
                     }
                 } else {
                     out->missed[a]++;
+                    state = SLOT_MISS;
                 }
             } else {
                 out->next[a] = slot;       // first future slot; stop here
                 break;
+            }
+            if (out->n_slots[a] < SLOTS_MAX) {
+                const int k = out->n_slots[a]++;
+                out->slots[a][k]     = state;
+                out->slot_time[a][k] = slot;
+                out->slot_ts[a][k]   = ev ? ev->ts : 0;
             }
 
             time_t adv = wfh_slot_after(def, anchor ? anchor : slot, s);

@@ -97,9 +97,11 @@ static void run_fixture(const fixture_t *fx) {
     for (int i = 0; i < fx->n_events; i++) {
         const int a = config_action_index(&s, fx->events[i].action);
         if (a < 0) { failf("event names unknown action '%s'", fx->events[i].action); return; }
+        event_kind_t kind;
+        if (!wfh_kind_parse(fx->events[i].kind, &kind)) { failf("event has unknown kind '%s'", fx->events[i].kind); return; }
         log_event_t *e = &log.events[log.events_len++];
         e->action = a;
-        e->kind   = strcmp(fx->events[i].kind, "done") == 0 ? KIND_DONE : KIND_SKIP;
+        e->kind   = kind;
         e->ts     = hhmm_on(ref, fx->events[i].ts);
         e->slot   = hhmm_on(ref, fx->events[i].slot);
     }
@@ -161,12 +163,93 @@ static void run_fixture(const fixture_t *fx) {
     }
 }
 
+/** Water every 45 from 09:00: 09:45, 10:30, 11:15 let slide, 12:00 answered
+ *  at 12:05. The row must read miss, miss, miss, done — the fill sits on
+ *  the slot that was answered, not on the first dot. */
+static void timeline_fills_the_answered_slot(void) {
+    g_fixture = "timeline: the dot that fills is the slot answered";
+    setenv("TZ", "GMT0BST,M3.5.0/1,M10.5.0", 1);
+    tzset();
+    settings_t s = *config_default();
+    const int a = config_action_index(&s, "water");
+    const time_t ref = day_noon("2026-09-02");
+
+    day_log_t log;
+    memset(&log, 0, sizeof log);
+    log_event_t *e = &log.events[log.events_len++];
+    e->action = a; e->kind = KIND_DONE;
+    e->ts = hhmm_on(ref, "12:05"); e->slot = hhmm_on(ref, "12:00");
+
+    day_view_t v;
+    wfh_derive(&log, hhmm_on(ref, "12:10"), &s, &v);
+
+    static const uint8_t want[] = { SLOT_MISS, SLOT_MISS, SLOT_MISS, SLOT_DONE };
+    if (v.n_slots[a] != 4) failf("n_slots = %d, want 4", v.n_slots[a]);
+    for (int i = 0; i < 4 && i < v.n_slots[a]; i++) {
+        if (v.slots[a][i] != want[i]) failf("slot %d = %d, want %d", i, v.slots[a][i], want[i]);
+    }
+    if (v.counts[a] != 1 || v.missed[a] != 3) failf("tallies %d done / %d missed, want 1 / 3", v.counts[a], v.missed[a]);
+}
+
+/** Snack at 10:45, unanswered and snoozed at 12:10: off the due list, but
+ *  still the open slot — the popup keeps saying "missed at 10:45". */
+static void open_slot_survives_a_snooze(void) {
+    g_fixture = "open slot: a snooze hides it from due, not from the popup";
+    setenv("TZ", "GMT0BST,M3.5.0/1,M10.5.0", 1);
+    tzset();
+    settings_t s = *config_default();
+    const int a = config_action_index(&s, "snack");
+    const time_t ref = day_noon("2026-09-02");
+
+    day_log_t log;
+    memset(&log, 0, sizeof log);
+    log.snoozed_until[a] = hhmm_on(ref, "12:25");
+
+    day_view_t v;
+    wfh_derive(&log, hhmm_on(ref, "12:10"), &s, &v);
+
+    if (v.open_slot[a] != hhmm_on(ref, "10:45")) failf("open_slot = %s, want 10:45", clock_str(v.open_slot[a]));
+    for (int i = 0; i < v.n_due; i++) if (v.due[i] == a) failf("a snoozed slot is still on the due list");
+    if (v.next[a] != hhmm_on(ref, "15:30")) failf("next = %s, want 15:30", clock_str(v.next[a]));
+}
+
+/** Done at 09:51 on the 09:45 water, undone at 09:58: the latest event
+ *  wins, so at 10:00 the slot is open again and counts nothing. */
+static void undo_reopens_the_slot(void) {
+    g_fixture = "undo: the latest event for a slot is the truth";
+    setenv("TZ", "GMT0BST,M3.5.0/1,M10.5.0", 1);
+    tzset();
+    settings_t s = *config_default();
+    const int a = config_action_index(&s, "water");
+    const time_t ref = day_noon("2026-09-02");
+
+    day_log_t log;
+    memset(&log, 0, sizeof log);
+    log.events[log.events_len++] = (log_event_t){ .action = a, .kind = KIND_DONE, .ts = hhmm_on(ref, "09:51"), .slot = hhmm_on(ref, "09:45") };
+    log.events[log.events_len++] = (log_event_t){ .action = a, .kind = KIND_UNDO, .ts = hhmm_on(ref, "09:58"), .slot = hhmm_on(ref, "09:45") };
+
+    day_view_t v;
+    wfh_derive(&log, hhmm_on(ref, "10:00"), &s, &v);
+
+    if (v.counts[a] != 0) failf("counts = %d after undo, want 0", v.counts[a]);
+    if (v.open_slot[a] != hhmm_on(ref, "09:45")) failf("open_slot = %s, want 09:45", clock_str(v.open_slot[a]));
+    if (v.n_slots[a] < 1 || v.slots[a][0] != SLOT_DUE) failf("slot 0 state = %d, want due", v.n_slots[a] ? v.slots[a][0] : -1);
+    if (v.n_slots[a] < 1 || v.slot_ts[a][0] != 0) failf("slot 0 keeps a tap time after undo");
+    if (v.n_slots[a] < 1 || v.slot_time[a][0] != hhmm_on(ref, "09:45")) failf("slot 0 time wrong");
+}
+
 int main(void) {
     printf("derive: %d fixtures\n", FIXTURE_COUNT);
     for (int i = 0; i < FIXTURE_COUNT; i++) {
         const int before = g_failures;
         run_fixture(&FIXTURES[i]);
         if (g_failures == before) printf("  ok    %s\n", FIXTURES[i].name);
+    }
+    void (*const extra[])(void) = { timeline_fills_the_answered_slot, open_slot_survives_a_snooze, undo_reopens_the_slot };
+    for (size_t i = 0; i < sizeof extra / sizeof extra[0]; i++) {
+        const int before = g_failures;
+        extra[i]();
+        if (g_failures == before) printf("  ok    %s\n", g_fixture);
     }
     if (g_failures) {
         printf("\n%d assertion%s failed\n", g_failures, g_failures == 1 ? "" : "s");

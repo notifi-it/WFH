@@ -16,15 +16,13 @@ CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 # stack, which surfaces as an unrelated assert inside the flash mutex.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=16384
 
-# The storage spike writes thousands of rows in one go; keep the watchdog
-# from calling a long synchronous=FULL run a hang.
+# Task watchdog window; the default is 5s.
 CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
 CONFIG_LV_FONT_MONTSERRAT_14=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
-CONFIG_LV_USE_PERF_MONITOR=y
 
 # The QSPI panel is fed by DMA, and the framebuffer is cache-backed. Waveshare
 # set this in every one of their examples and the S1 spike inherited it; the
@@ -33,15 +31,23 @@ CONFIG_LV_USE_PERF_MONITOR=y
 # display was up. Framebuffer corruption reports nothing.
 CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
 CONFIG_LV_USE_SNAPSHOT=y
-
-# The BSP's default draw buffer is one 100-row strip, and LVGL composes the
-# screen in pieces through it. That is fine for a demo; this UI draws six
-# tiles with washes, dot rows and a 30fps waterline, and the strips arrived
-# on the panel torn — a corrupted band through the middle that looked for
-# all the world like a driver fault. A full-screen buffer removes the
-# strips entirely. 368*448*2 = 330KB, which is nothing against 8MB of PSRAM.
-CONFIG_BSP_DISPLAY_LVGL_AVOID_TEAR=y
-CONFIG_BSP_DISPLAY_LVGL_FULL_REFRESH=y
 CONFIG_WFH_DUMP_FRAMEBUFFER=y
+
+# The framebuffer dump goes out over the USB-Serial/JTAG port. As the
+# *secondary* console that path is best-effort — it silently drops bytes
+# whenever its 64-byte FIFO backs up, which shears every capture. As the
+# primary console, writes block until the host drains the FIFO.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_36=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+
+# The panel's DMA draw buffer must live in internal RAM (see main.c); 50 rows
+# is 36.8KB, and WiFi/lwIP buffers go to PSRAM so they do not compete for it.
+CONFIG_BSP_DISPLAY_LVGL_BUF_HEIGHT=50
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# Sub-pixel line coordinates: the waterline is a polyline, and on integer
+# points its crest steps in whole pixels.
+CONFIG_LV_USE_FLOAT=y

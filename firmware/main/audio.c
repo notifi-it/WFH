@@ -71,7 +71,7 @@ esp_err_t audio_init(int volume) {
 
 /** One tone, rendered and written synchronously. §9.1's envelope: without
  *  the attack ramp a square-edged start pops audibly on a small speaker. */
-void audio_tone(int freq_hz, int ms) {
+static void audio_tone(int freq_hz, int ms) {
     if (!g_speaker) return;
 
     const int n = (SAMPLE_RATE * ms) / 1000;

@@ -21,6 +21,7 @@
 #include "card.h"
 #include "config.h"
 #include "day.h"
+#include "feedback.h"
 #include "input.h"
 #include "ui.h"
 
@@ -32,32 +33,82 @@
 day_log_t  g_day;
 day_view_t g_view;
 settings_t g_settings;
-bool       g_settings_sound = true;
 
 void   day_reload(time_t now)                  { (void)now; }
 bool   day_apply_event(const log_event_t *ev)  { (void)ev; return true; }
 time_t day_current_or_next_slot(int a)         { (void)a; return 0; }
 void   input_done(int a)                       { printf("input_done(%s)\n", g_settings.actions[a].id); }
-void   input_skip(int a)                       { printf("input_skip(%s)\n", g_settings.actions[a].id); }
-void   input_toggle_sound(void)                { g_settings_sound = !g_settings_sound; }
+void   input_undo(int a, time_t slot)          { printf("input_undo(%s, %lld)\n", g_settings.actions[a].id, (long long)slot); }
+void   feedback_play(cue_t cue)                { printf("feedback_play(%d)\n", (int)cue); }
 
-/** A day mid-afternoon: some done, some skipped, some missed, all counting
- *  down. Chosen to exercise every dot state and a range of wash heights. */
+// The card's "missed HH:MM" reads the due list, so this one is real.
+time_t day_due_slot(int a) {
+    for (int i = 0; i < g_view.n_due; i++) if (g_view.due[i] == a) return g_view.due_slot[i];
+    return 0;
+}
+
+/** A late morning, 12:20: some done, some skipped, some missed, all
+ *  counting down. Chosen to exercise every dot state and a range of wash
+ *  heights; water gets a full timeline for the history screen. */
+time_t g_fake_now;                          // what ui.c sees as time(NULL)
+
 static void fake_day(void) {
     g_settings = *config_default();
     const time_t now = time(NULL);
 
-    const int done[]  = { 4, 3, 2, 1, 0, 1 };
+    const int done[]  = { 4, 2, 2, 1, 0, 1 };
     const int skip[]  = { 0, 1, 0, 0, 0, 0 };
     const int miss[]  = { 1, 0, 2, 0, 0, 0 };
     const int mins[]  = { 4, 18, 1, 33, 26, 55 };
+
+    // The same tallies as a timeline, matching design/board-v4c.html.
+    static const char *const tl[] = { "DDDDM", "DDS", "DDMM", "U", "", "D" };
 
     for (int i = 0; i < g_settings.n_actions; i++) {
         g_view.counts[i]  = done[i];
         g_view.skipped[i] = skip[i];
         g_view.missed[i]  = miss[i];
         g_view.next[i]    = now + mins[i] * 60;
+        for (const char *p = tl[i]; *p; p++) {
+            g_view.slots[i][g_view.n_slots[i]++] =
+                *p == 'D' ? SLOT_DONE : *p == 'S' ? SLOT_SKIP : *p == 'U' ? SLOT_DUE : SLOT_MISS;
+        }
     }
+
+    // Four slots let slide, for the card and the popup's "missed at" state.
+    // Times of day, so the screens read like a real late morning.
+    struct tm tm;
+    localtime_r(&now, &tm);
+    const int due[]     = { 0, 1, 3, 4 };
+    const int due_hm[][2] = { { 11, 40 }, { 11, 15 }, { 10, 45 }, { 13, 0 } };
+    for (int i = 0; i < 4; i++) {
+        tm.tm_hour = due_hm[i][0]; tm.tm_min = due_hm[i][1]; tm.tm_sec = 0;
+        g_view.due[i]      = due[i];
+        g_view.due_slot[i] = mktime(&tm);
+        g_view.open_slot[due[i]] = g_view.due_slot[i];
+    }
+    g_view.n_due = 4;
+    g_day.snoozed_until[1] = now + 12 * 60;     // water: popup's snoozed state
+
+    // Water's day for the history screen, matching design/history-v4.html#water:
+    // 09:45 done, 10:30 done, 11:15 skipped, 12:00 open — and "now" is 12:20.
+    tm.tm_hour = 12; tm.tm_min = 20; tm.tm_sec = 0;
+    g_fake_now = mktime(&tm);
+    static const struct { int h, m, at_h, at_m; uint8_t st; } water[] = {
+        { 9, 45,  9, 51, SLOT_DONE }, { 10, 30, 10, 29, SLOT_DONE },
+        { 11, 15, 11, 20, SLOT_SKIP }, { 12, 0, 0, 0, SLOT_DUE },
+    };
+    g_view.n_slots[1] = 0;
+    for (size_t i = 0; i < sizeof water / sizeof water[0]; i++) {
+        tm.tm_hour = water[i].h; tm.tm_min = water[i].m;
+        g_view.slot_time[1][i] = mktime(&tm);
+        tm.tm_hour = water[i].at_h; tm.tm_min = water[i].at_m;
+        g_view.slot_ts[1][i]   = water[i].at_h ? mktime(&tm) : 0;
+        g_view.slots[1][i]     = water[i].st;
+        g_view.n_slots[1]++;
+    }
+    tm.tm_hour = 12; tm.tm_min = 45;
+    g_view.next[1] = mktime(&tm);
 }
 
 // ------------------------------------------------------------- png + display
@@ -124,6 +175,17 @@ int main(int argc, char **argv) {
     fake_day();
     ui_build();
     if (strcmp(screen, "popup") == 0) ui_show_popup(1);      // water
+    if (strcmp(screen, "stretch") == 0) ui_show_stretch(5);
+    if (strcmp(screen, "rollflow") == 0) ui_show_stretch(2);
+    if (strcmp(screen, "history") == 0) ui_show_history(1);   // water
+    if (strcmp(screen, "card") == 0) {                       // 3-way collision
+        g_card.rows[0] = (card_row_t){ .action = 0, .checked = true  };
+        g_card.rows[1] = (card_row_t){ .action = 1, .checked = true  };
+        g_card.rows[2] = (card_row_t){ .action = 3, .checked = false };
+        g_card.rows[3] = (card_row_t){ .action = 4, .checked = false };
+        g_card.len = 4;
+        ui_show_card();
+    }
 
     // Let LVGL settle: screen load animations and the first full render.
     for (int i = 0; i < 60; i++) { lv_tick_inc(16); lv_timer_handler(); }

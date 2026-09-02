@@ -7,6 +7,10 @@
 
 #include "wfh_types.h"
 
+/** One snooze length everywhere: the card's delay-all, the card's X and the
+ *  guided flow's X are the same promise. Absolute, not additive. */
+#define CARD_SNOOZE_S (15 * 60)
+
 typedef struct {
     int  action;
     bool checked;
@@ -20,11 +24,10 @@ typedef struct {
 } card_t;
 
 /** Everything the card reaches outside itself. The firmware wires these to
- *  input_done / input_skip (§7.4) and the LVGL screens (§7.3); the test
- *  wires them to a recorder. */
+ *  input_done (§7.4) and the LVGL screens (§7.3); the test wires them to a
+ *  recorder. */
 typedef struct {
     void (*log_done)(int action, void *ctx);
-    void (*log_skip)(int action, void *ctx);
     void (*show_card)(void *ctx);
     void (*show_grid)(void *ctx);
     void (*take_stretch)(int action, void *ctx);
@@ -38,11 +41,5 @@ bool card_sync(card_t *c, const int *due, int n_due, const settings_t *s,
                time_t now, const card_host_t *host);
 
 void card_toggle(card_t *c, int row);
-void card_confirm(card_t *c, const card_host_t *host);
-void card_skip_row(card_t *c, int row, const card_host_t *host);
+void card_confirm(card_t *c, day_log_t *log, time_t now, const card_host_t *host);
 void card_delay_all(card_t *c, day_log_t *log, time_t now, const card_host_t *host);
-void card_dismiss(card_t *c, const card_host_t *host);
-
-/** The physical key answers the single highest-priority due action,
- *  independent of what is checked (§6). No-op on an empty card. */
-void card_key_press(card_t *c, const card_host_t *host);

@@ -2,6 +2,8 @@
 // Pure function of (log, now, settings) — no I/O, no globals, host-testable.
 #pragma once
 
+#include <stdbool.h>
+
 #include "wfh_types.h"
 
 /** "HH:MM" on the calendar day of `day`, resolved in local time.
@@ -21,5 +23,16 @@ time_t wfh_slot_after(const action_def_t *def, time_t from, const settings_t *s)
 /** When an unanswered slot stops being due and becomes a miss: the action's
  *  next slot, or work_end + grace for the last slot of the day. */
 time_t wfh_window_close(const action_def_t *def, time_t slot, const settings_t *s);
+
+/** The last event logged for (action, slot), or NULL if there is none. The
+ *  log is in tap order, so the last match is the latest (§3.4). Undo
+ *  events are returned too — the caller decides what an undo means. */
+const log_event_t *wfh_latest_event(const day_log_t *log, int action, time_t slot);
+
+/** "done" / "skip" / "undo": the kind as it is written to storage. */
+const char *wfh_kind_name(event_kind_t k);
+
+/** The inverse of wfh_kind_name. False, with *out untouched, for any other text. */
+bool wfh_kind_parse(const char *name, event_kind_t *out);
 
 void wfh_derive(const day_log_t *log, time_t now, const settings_t *s, day_view_t *out);

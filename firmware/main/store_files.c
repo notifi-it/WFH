@@ -1,14 +1,15 @@
-// §15.1 R1 kill switch: the same store.h, backed by one append-only file per
-// day instead of SQLite. Appending is the one thing LittleFS is actually good
-// at — it is copy-on-write, so rewriting the middle of a file (which is what
-// a B-tree does on every insert) costs block copies that get worse as the
-// file grows.
+// One append-only file per day. Appending is the one thing LittleFS is
+// actually good at — it is copy-on-write, so rewriting the middle of a file
+// costs block copies that get worse as the file grows.
 //
-// Line format is TSV, not the JSONL §15.1 sketched: same plain-text,
-// greppable, curl-able properties, but writable with one fprintf and
-// parseable with one sscanf, so there is no JSON parser in the firmware.
+// Line format is TSV: plain text, greppable, curl-able, writable with one
+// fprintf and parseable with one sscanf, so there is no JSON parser in the
+// firmware.
 //
 //   <ts>\t<slot>\t<action>\t<kind>\t<uuid>\n
+//
+// The uuid is a per-line identity for external tooling. The firmware writes
+// it and never parses it.
 #include "store.h"
 
 #include <dirent.h>
@@ -20,6 +21,8 @@
 #include "esp_littlefs.h"
 #include "esp_log.h"
 #include "esp_random.h"
+
+#include "derive.h"
 
 static const char *TAG = "store";
 #define DAY_DIR "/fs/d"
@@ -36,8 +39,6 @@ static void day_path(const char *day, char *out, size_t n) {
     snprintf(out, n, DAY_DIR "/%s", day);
 }
 
-static void close_day(void);
-
 esp_err_t store_open(void) {
     esp_vfs_littlefs_conf_t fs = {
         .base_path = "/fs", .partition_label = "storage", .format_if_mount_failed = true,
@@ -51,10 +52,6 @@ esp_err_t store_open(void) {
     mkdir(DAY_DIR, 0755);
     return ESP_OK;
 }
-
-void store_close(void) { close_day(); }
-
-const char *store_journal_mode(void) { return "append+fsync"; }
 
 void store_load_day(const char *day, day_log_t *out, const settings_t *s) {
     memset(out, 0, sizeof *out);
@@ -74,9 +71,12 @@ void store_load_day(const char *day, day_log_t *out, const settings_t *s) {
         for (int i = 0; i < s->n_actions; i++) if (strcmp(s->actions[i].id, action) == 0) { a = i; break; }
         if (a < 0) continue;
 
+        event_kind_t k;
+        if (!wfh_kind_parse(kind, &k)) continue;
+
         log_event_t *e = &out->events[out->events_len++];
         e->action = a;
-        e->kind   = strcmp(kind, "done") == 0 ? KIND_DONE : KIND_SKIP;
+        e->kind   = k;
         e->ts     = (time_t)ts;
         e->slot   = (time_t)slot;
     }
@@ -117,43 +117,23 @@ bool store_add_event(const log_event_t *ev, const settings_t *s) {
     const char *day = store_day_key(ev->ts);
     if (!open_day(day, s)) return false;
 
-    // The UNIQUE (action, slot) constraint moves from the schema to here —
-    // the one thing genuinely lost by dropping SQLite, so it is the one
-    // thing the tests have to keep honest.
-    for (int i = 0; i < g_cache.events_len; i++) {
-        if (g_cache.events[i].action == ev->action && g_cache.events[i].slot == ev->slot) return false;
-    }
+    // Idempotence per (action, slot): the latest event is the truth (§3.4),
+    // so a repeat of whatever is already latest is a duplicate and is not
+    // written. A different kind — an undo after a done, a done after an
+    // undo — is a real change and appends.
+    const log_event_t *latest = wfh_latest_event(&g_cache, ev->action, ev->slot);
+    if (latest ? latest->kind == ev->kind : ev->kind == KIND_UNDO) return false;
 
     fprintf(g_fp, "%lld\t%lld\t%s\t%s\t%08lx%08lx\n",
             (long long)ev->ts, (long long)ev->slot,
-            s->actions[ev->action].id, ev->kind == KIND_DONE ? "done" : "skip",
+            s->actions[ev->action].id, wfh_kind_name(ev->kind),
             (unsigned long)esp_random(), (unsigned long)esp_random());
 
     fflush(g_fp);
-    fsync(fileno(g_fp));                       // what synchronous=FULL was buying
+    fsync(fileno(g_fp));                       // the line is on flash before the tap is acknowledged
 
     if (g_cache.events_len < EVENTS_MAX) g_cache.events[g_cache.events_len++] = *ev;
     return true;
-}
-
-int store_count_events(void) {
-    DIR *d = opendir(DAY_DIR);
-    if (!d) return 0;
-
-    int n = 0;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        if (e->d_name[0] == '.') continue;
-        char path[64];
-        day_path(e->d_name, path, sizeof path);
-        FILE *f = fopen(path, "r");
-        if (!f) continue;
-        int c;
-        while ((c = fgetc(f)) != EOF) if (c == '\n') n++;
-        fclose(f);
-    }
-    closedir(d);
-    return n;
 }
 
 void store_prune(int keep_days) {

@@ -1,4 +1,4 @@
-# Host build for the derive tests (§11.1). No ESP-IDF, no board.
+# Host build for the derive (§11.1) and card (§6) tests. No ESP-IDF, no board.
 #   make        build and run
 #   make gen    regenerate actions.g.h / fixtures.g.h from JSON
 CC      ?= cc

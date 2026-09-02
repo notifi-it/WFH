@@ -4,10 +4,16 @@
 
 #include "wfh_types.h"
 
-typedef struct { const char *name; int seconds; const char *cue; } stretch_def_t;
+// Credentials live in the ignored wifi.g.h; a checkout without one is offline.
+#if __has_include("wifi.g.h")
+#include "wifi.g.h"
+#else
+#define WIFI_SSID ""
+#define WIFI_PASS ""
+#endif
 
 #define ACTIONS_COUNT   6
-#define STRETCH_COUNT   4
+#define STRETCH_COUNT   3
 
 static const action_def_t ACTIONS[ACTIONS_COUNT] = {
     { .id = "stand", .name = "Stand break",
@@ -22,7 +28,7 @@ static const action_def_t ACTIONS[ACTIONS_COUNT] = {
 
     { .id = "roll", .name = "Shoulder roll",
       .blurb = "Ten slow rolls back, then drop the shoulders.",
-      .target = 8, .priority = 1, .flow = FLOW_TAP,
+      .target = 8, .priority = 1, .flow = FLOW_STRETCH,
       .cadence = { .kind = CADENCE_INTERVAL, .every_min = 60 } },
 
     { .id = "snack", .name = "Snack",
@@ -36,16 +42,15 @@ static const action_def_t ACTIONS[ACTIONS_COUNT] = {
       .cadence = { .kind = CADENCE_FIXED, .n_times = 1, .times = { "13:00" } } },
 
     { .id = "stretch", .name = "Stretches",
-      .blurb = "Four stretches, about three minutes.",
+      .blurb = "Three stretches, about two minutes.",
       .target = 2, .priority = 3, .flow = FLOW_STRETCH,
       .cadence = { .kind = CADENCE_FIXED, .n_times = 2, .times = { "11:30", "16:30" } } },
 };
 
 static const stretch_def_t STRETCHES[STRETCH_COUNT] = {
-    { .name = "Chin tucks", .seconds = 30, .cue = "Draw the chin straight back. Hold, release, repeat." },
-    { .name = "Doorway pec stretch", .seconds = 40, .cue = "Forearms on the frame, step through, chest open." },
-    { .name = "Cat-cow", .seconds = 40, .cue = "On all fours, arch and round with the breath." },
-    { .name = "Hip flexor stretch", .seconds = 50, .cue = "Half kneel, tuck the pelvis, 25s each side." },
+    { .name = "Chin tucks", .seconds = 30, .cue = "Draw the chin straight back, hold, release. Resets a screen-jutted neck." },
+    { .name = "Doorway pec stretch", .seconds = 40, .cue = "Forearms on the frame, step through, chest open. Both sides at once." },
+    { .name = "Cat-cow", .seconds = 40, .cue = "All fours: arch up, dip down, with the breath. Loosens the sitting spine." },
 };
 
 static const settings_t SETTINGS_DEFAULT = {
@@ -53,6 +58,8 @@ static const settings_t SETTINGS_DEFAULT = {
     .work_end   = "18:00",
     .tz         = "GMT0BST,M3.5.0/1,M10.5.0",
     .grace_min  = 30,
+    .wifi_ssid  = WIFI_SSID,
+    .wifi_pass  = WIFI_PASS,
     .actions    = ACTIONS,
     .n_actions  = ACTIONS_COUNT,
 };

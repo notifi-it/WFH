@@ -6,7 +6,6 @@
 
 #include "esp_log.h"
 
-#include "config.h"
 #include "derive.h"
 #include "store.h"
 #include "ui.h"
@@ -40,13 +39,23 @@ bool day_apply_event(const log_event_t *ev) {
     ui_refresh();
 
     ESP_LOGI(TAG, "%s %s (slot %lld)", g_settings.actions[ev->action].id,
-             ev->kind == KIND_DONE ? "done" : "skip", (long long)ev->slot);
+             wfh_kind_name(ev->kind), (long long)ev->slot);
     return true;
 }
 
-time_t day_current_or_next_slot(int action) {
+time_t day_due_slot(int action) {
     for (int i = 0; i < g_view.n_due; i++) {
         if (g_view.due[i] == action) return g_view.due_slot[i];
     }
-    return g_view.next[action];        // "I just drank one" — answer the next slot
+    return 0;
+}
+
+time_t day_current_or_next_slot(int action) {
+    const time_t due = day_due_slot(action);
+    if (due) return due;
+    // Snoozed is off the due list but still the slot being asked about:
+    // Done on a snoozed lunch answers lunch, not "the next lunch" (there is
+    // none — that path wrote a slot-0 event nothing could display).
+    if (g_view.open_slot[action]) return g_view.open_slot[action];
+    return g_view.next[action];        // "I just drank one" — answer the next slot; 0 = day over
 }

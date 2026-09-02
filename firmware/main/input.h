@@ -1,9 +1,6 @@
 #pragma once
 
-#include <stdbool.h>
-
-extern bool g_settings_sound;
+#include <time.h>
 
 void input_done(int action);
-void input_skip(int action);
-void input_toggle_sound(void);
+void input_undo(int action, time_t slot);   // §7.7: takes back a done or skip
