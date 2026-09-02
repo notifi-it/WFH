@@ -510,7 +510,7 @@ Tapping a tile opens that action's popup (§7.3b). Nothing is logged from the gr
 
 Skipped and missed are visually distinct because deciding not to eat lunch and forgetting to log lunch are different facts about the day.
 
-Dots render in slot order, left to right: a timeline, not a tally. The dot that fills is the slot that was answered, and a slot let slide stays hollow in front of it — miss two and answer the third, and the third fills. A due slot is hollow as well — the card and popup already call it missed, and it fills the moment it is answered. This is what makes the one-slot rule visible: an answer can only land on the slot that is currently open (or the next one if nothing is open, one slot ahead at most), so earlier misses are never backfilled. `derive` exposes the per-slot states (`slots[]`, `n_slots[]`) alongside the tallies. An overshoot (more done than the target) grows the row rather than truncating.
+Dots render in slot order, left to right: a timeline, not a tally. The dot that fills is the slot that was answered, and a slot let slide stays hollow in front of it — miss two and answer the third, and the third fills. A due slot is hollow as well — the card and popup already call it missed, and it fills the moment it is answered. This is what makes the one-slot rule visible: an answer can only land on the slot that is currently open (or the next one if nothing is open, one slot ahead at most), so earlier misses are never backfilled. `derive` exposes the per-slot states (`slots[]`, `n_slots[]`) alongside the tallies. The row has one dot per slot the day actually has (past plus upcoming), never fewer than the target, so a cadence that outruns its target still shows what is left.
 
 ### 7.3 The prompt card
 

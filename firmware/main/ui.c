@@ -883,12 +883,14 @@ static void dot_set(int a, int d, dot_state_t s, uint32_t tint) {
 }
 
 static void dots_refresh(int a) {
-    const int done = g_view.counts[a], skip = g_view.skipped[a], miss = g_view.missed[a];
-
-    // An overshoot grows the row rather than truncating: the day did what it
-    // did, and a tile that hides work is worse than one that runs long.
-    int n = done + skip + miss;
-    if (n < g_settings.actions[a].target) n = g_settings.actions[a].target;
+    // One dot per slot the day actually has: the ones walked so far plus
+    // the ones still to come, never fewer than the target. Sized from the
+    // target alone, a cadence that outruns its target (water: 11 slots to a
+    // target of 8) showed a full row with slots still ahead.
+    const action_def_t *def = &g_settings.actions[a];
+    int n = g_view.n_slots[a];
+    for (time_t t = g_view.next[a]; t && n < MAX_DOTS; t = wfh_slot_after(def, t, &g_settings)) n++;
+    if (n < def->target) n = def->target;
     if (n > MAX_DOTS) n = MAX_DOTS;
 
     if (n != g_dot_shown[a]) {                          // lay the row out once
