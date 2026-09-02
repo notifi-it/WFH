@@ -15,25 +15,29 @@ Three ways to look at the UI, and what each one lies about:
 
 | | shows | lies about |
 |---|---|---|
-| `design/*.html` | what the design *should* be | what the firmware actually draws |
+| `design/*.html` | the design | what the firmware actually draws |
 | `make -C sim grid` | what the firmware draws, correct colour | it is not the panel |
-| `tools/grab-screen.sh` | the board's own framebuffer | **colour** — decodes wrongly |
+| `tools/grab-screen.sh` | the board's own framebuffer | nothing, **if it prints `clean`** |
 
-Use the simulator for "does this look right". Use the capture only to confirm
-the board is running what you think it is. Hours went into chasing colour
-bands that only ever existed in that capture — and the person looking at the
-actual panel kept saying the colours were fine. **When the instrument and the
-human disagree about what is on a screen, the human is right.**
+Use the simulator for "does this look right"; use the capture to confirm the
+board is running what you think it is. The capture's colour used to decode
+wrongly: the dump went out the *secondary* console (USB-Serial/JTAG), which
+silently drops bytes when its 64-byte FIFO backs up, and one lost byte
+sheared everything after it. Hours went into chasing colour bands that only
+ever existed in that capture — the person looking at the panel kept saying
+the colours were fine. Fixed by making USB-Serial/JTAG the primary console
+and framing the dump per row; lost rows now come out magenta and the tool
+reports them. A capture that reports dropped rows is not evidence of
+anything — regrab it. **When the instrument and the human disagree about
+what is on a screen, the human is right.**
 
 ## Changing the UI
 
-- Change `design/*.html` and the firmware together, then render both. They
-  drift silently otherwise, and a stale mock is worse than none.
-- `design/prototype-standalone.html` is generated (fonts inlined). Regenerate
-  it or you are reviewing an old design.
-- Transcribe the design element by element, not by eye. The countdown sat
-  bottom-right on the board and top-right in the design for days; it was
-  stealing the dot row's width, and no amount of resizing the dots fixed it.
+- Change `design/*.html` and the firmware together, then render both, and
+  transcribe the design element by element rather than by eye. They drift
+  silently otherwise: the countdown sat bottom-right on the board and
+  top-right in the design for days, stealing the dot row's width, and no
+  amount of resizing the dots fixed it.
 
 ## LVGL
 
@@ -45,12 +49,22 @@ human disagree about what is on a screen, the human is right.**
   emits the LVGL 8 glyph API: it compiles clean and renders *nothing at all*.
   Same class of trap for images — write converters against the struct in
   `firmware/managed_components/lvgl__lvgl`, not against a tool's idea of it.
-- LVGL's bundled fonts carry the `LV_SYMBOL_*` glyphs. A custom ASCII-only
-  font does not, so symbol labels must keep the bundled font.
+- The firmware uses only LVGL's bundled Montserrat fonts (14/16/28/36/48).
+  They carry the `LV_SYMBOL_*` glyphs; a generated ASCII-only font does not,
+  so the X and the history marks would render blank under it.
+- **Never delete an object from inside its own event handler.** The feed's
+  Undo rebuilt the list with `lv_obj_clean()` in the button's click
+  callback; LVGL kept walking the freed button and the UI froze on the
+  next tap, mutex held, no panic. Defer with `lv_async_call()`. The tick
+  task now reboots the board after 15s without the display lock, so a
+  repeat of this class costs a restart instead of an unplug.
 - `clip_corner` forces a per-pixel mask layer on every redraw. Invisible at
   1 Hz, starves the LVGL task at 30fps and trips the watchdog.
-- Animate as little as possible: the waterline moves, the body does not. A
-  moving surface is geometry (555us/frame); a fluid is per-pixel work.
+- Animate as little as possible. The shipped waterline (`design/board-v4c`)
+  is a static tinted wash whose height is the fraction elapsed, plus a thin
+  crest: an `lv_line` of 61 float points, two sines, 30fps. The body never
+  animates. A moving polyline is geometry (555us/frame); a fluid is
+  per-pixel work.
 
 ## This board
 
@@ -70,6 +84,40 @@ human disagree about what is on a screen, the human is right.**
   nothing to an existing build — delete `sdkconfig` and rebuild.
 - After a crash loop the USB-Serial/JTAG can stop answering entirely. No
   software reset recovers it; it needs BOOT held while replugging USB.
+- **The WiFi radio and the QSPI panel cannot be alive at the same time.**
+  With the radio up the panel tears into white bands and then freezes, while
+  LVGL's own snapshot stays clean. Quiescing every panel write during the
+  radio window did not help; the panel desyncs regardless. SNTP therefore
+  runs in `app_main` *before* `panel_power_up()`, blocking, and the radio is
+  stopped before the panel gets power (`wifi_time.c`).
+- **The panel's draw buffer must be internal DMA RAM, reserved before
+  WiFi.** The BSP allocates it with default caps, which at >16KB means
+  PSRAM. The SPI driver cannot DMA from PSRAM, so it allocates a private
+  internal bounce buffer per ~32KB chunk — and once WiFi has taken its
+  share of internal RAM those allocations fail intermittently. The chunk
+  is dropped and the panel keeps its old rows: two frames interleaved in
+  ~44-row bands, with LVGL's snapshot perfectly clean. The log says
+  `setup_dma_priv_buffer: Failed to allocate priv TX buffer`. `main.c`
+  reserves 50 rows of internal DMA RAM before WiFi and installs it over the
+  port's token buffer with `lv_display_set_buffers()`; freeing it for the
+  port to re-take was tried and failed one boot in three, because the port
+  allocates its context struct first and that lands in the hole.
+  `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP` keeps WiFi out of internal RAM.
+- **`bsp_display_start()` registers this SPI panel with the LVGL port as an
+  RGB display.** For RGB panels the port reports the draw buffer free the
+  moment a transfer is queued — right for a memory-mapped framebuffer,
+  wrong for a DMA still streaming from the buffer. It only ever worked
+  because the PSRAM bounce path copied the pixels out synchronously; give
+  it a DMA-capable buffer and LVGL paints the next chunk over the one in
+  flight (pink bands, thin slivers of the real screen). `main.c` brings the
+  display up itself with `lvgl_port_add_disp()`, so the buffer is released
+  from the transfer-done callback.
+- **Stop the radio, do not `esp_wifi_deinit()` it.** Deinit frees the
+  driver's internal RAM; the panel bring-up then allocates LVGL's tick mutex
+  at the WiFi task's old address and the driver's teardown writes over it —
+  seen as an interrupt-WDT panic spinning in `lvgl_port_tick_increment`,
+  every boot, right after `LCD panel create success`. Decode with
+  `xtensa-esp32s3-elf-addr2line -pfiaC -e build/wfh.elf <addrs>`.
 
 ## Storage
 
@@ -81,11 +129,13 @@ tap pay for every day ever recorded.
 
 ## Tests
 
-`make -C firmware/test` runs `derive` and the card on the host, no board.
-**A suite that passes first try has not been shown to work** — break the code
-on purpose and confirm the tests catch it. The mutations that must fail are
-listed in `fixtures/derive/README.md`. The DST fixtures assert hand-computed
-epoch constants; never regenerate them from program output.
+`make -C firmware/test` runs `derive` and the card on the host, no board. The
+`test_derive` and `test_card` binaries and their `.dSYM` directories are build
+products and gitignored. **A suite that passes first try has not been shown
+to work** — break the code on purpose and confirm the tests catch it. The
+mutations that must fail are listed in `fixtures/derive/README.md`. The DST
+fixtures assert hand-computed epoch constants; never regenerate them from
+program output.
 
 ## Shell
 
