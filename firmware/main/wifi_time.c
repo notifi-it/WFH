@@ -63,7 +63,11 @@ bool wifi_time_sync(const char *ssid, const char *pass, int timeout_s) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wc));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    esp_sntp_config_t sc = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    // Three servers, cycled by lwIP on each retry: one lost UDP packet to a
+    // single server used to cost the whole window on this weak link, and a
+    // board that misses its sync runs the day on the build-time seed.
+    esp_sntp_config_t sc = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("pool.ntp.org", "time.google.com", "time.cloudflare.com"));
     sc.sync_cb = on_sync;
     ESP_ERROR_CHECK(esp_netif_sntp_init(&sc));
     ESP_LOGI(TAG, "wifi up, waiting for SNTP (max %ds, screen stays dark)…", timeout_s);

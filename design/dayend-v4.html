@@ -1,0 +1,43 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>dayend-v4</title>
+<!--
+  After the last window can close (work end + grace) until work start: the
+  day's tally and nothing to answer. Tapping anywhere peeks at the grid.
+  Same geometry and system as card-v4.html.
+-->
+<style>
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-500.woff2") format("woff2"); font-weight: 500; }
+  @font-face { font-family: "Geist"; src: url("fonts/Geist-700.woff2") format("woff2"); font-weight: 700; }
+  html, body { margin: 0; background: #000; }
+  body { width: 368px; height: 448px; overflow: hidden; position: relative;
+         background: #0a0d11; color: #e6edf3;
+         font: 500 14px/1.3 Geist, -apple-system, system-ui, sans-serif; }
+  .title { position: absolute; left: 0; right: 0; top: 52px; text-align: center;
+           font-size: 28px; font-weight: 700; letter-spacing: -.02em; }
+  .sub   { position: absolute; left: 0; right: 0; top: 92px; text-align: center;
+           color: rgba(230,237,243,.5); }
+  /* The tally: the six actions in their tints, done over target. A full
+     one reads bright, an unfinished one muted — no rings, no judgement. */
+  .tally { position: absolute; left: 16px; right: 16px; top: 150px;
+           display: grid; grid-template-columns: repeat(3, 1fr); row-gap: 28px; }
+  .cell  { text-align: center; color: var(--tint); }
+  .ic    { width: 40px; height: 40px; }
+  .n     { margin-top: 6px; font-size: 15px; color: rgba(230,237,243,.5);
+           font-variant-numeric: tabular-nums; }
+  .n b   { color: var(--tint); font-weight: 700; font-size: 18px; }
+  .foot  { position: absolute; left: 0; right: 0; bottom: 28px; text-align: center;
+           font-size: 13px; color: rgba(230,237,243,.35); }
+</style>
+
+<div class="title">See you tomorrow</div>
+<div class="sub">Back at 09:00</div>
+<div class="tally">
+  <div class="cell" style="--tint:#7fd4a8"><svg class="ic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 21h-1l-.927-3.708a1 1 0 0 0-.295-.495L9.5 13.8m-3 7.2l-.5-.5l2.333-2.333a1 1 0 0 0 .242-.391L9 16.5m-3-4l1.393-2.322a1 1 0 0 1 .276-.299L11 7.5l3.37 3.852q.13.148.306.236l1.824.912M14 5a2 2 0 1 1-4 0a2 2 0 0 1 4 0m-4 9a.97.97 0 0 1-.943-1.203l1-4.059a.971.971 0 0 1 1.886.465l-1 4.059a.97.97 0 0 1-.944.738"/></svg><div class="n"><b>7</b>/10</div></div>
+  <div class="cell" style="--tint:#6ec3e0"><svg class="ic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 9s2.5-1 6 .5s6 .5 6 .5m-8 3h.002M13 16h.002m3.103 5h-8.21a1 1 0 0 1-.994-.89L5.061 3.555A.5.5 0 0 1 5.56 3h12.88a.5.5 0 0 1 .497.555l-1.84 16.555a1 1 0 0 1-.993.89"/></svg><div class="n"><b>8</b>/8</div></div>
+  <div class="cell" style="--tint:#b6a3e8"><svg class="ic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M13.5 6.5m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0"/><path d="M13.5 6.5c-1.5 0-2.5 1-4 1s-2.5-1-2.5-1m8 14v-5.5l-2-2.5m-5.5 8l2.5-5.5l1.5-4.5c1.5 1 2.5 2 4.5 2"/></g></svg><div class="n"><b>5</b>/8</div></div>
+  <div class="cell" style="--tint:#e8b06a"><svg class="ic" viewBox="0 0 24 24"><path fill="currentColor" d="M10 9.5a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0m0 6a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0m6-2a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0"/><path fill="none" stroke="currentColor" stroke-width="2" d="M17 7a.125.125 0 0 0-.16-.12A3 3 0 0 1 13 4c0-.49-.304-.987-.794-.998L12 3a9 9 0 1 0 8.9 7.653c-.062-.414-.481-.653-.9-.653a3 3 0 0 1-3-3Z"/><path fill="none" stroke="currentColor" stroke-width="2" d="M10 9.5a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0Zm0 6a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0Zm6-2a.5.5 0 1 1-1 0a.5.5 0 0 1 1 0Z"/></svg><div class="n"><b>1</b>/2</div></div>
+  <div class="cell" style="--tint:#e8926a"><svg class="ic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 3.5a1.245 1.245 0 0 1 .662 1.84l-.824 1.32A1.245 1.245 0 0 0 16.5 8.5m-4.5-5a1.245 1.245 0 0 1 .662 1.84l-.824 1.32A1.245 1.245 0 0 0 12.5 8.5M8 3.5a1.245 1.245 0 0 1 .662 1.84l-.824 1.32A1.245 1.245 0 0 0 8.5 8.5M20 11H4v1a7 7 0 0 0 5 6.71c.952.283.524.623.217 1.321c-.223.506.23.969.783.969h4c.552 0 1.006-.463.783-.969c-.307-.698-.735-1.038.217-1.32c2.892-.861 5-3.54 5-6.711z"/></svg><div class="n"><b>1</b>/1</div></div>
+  <div class="cell" style="--tint:#e0d16a"><svg class="ic" viewBox="0 0 24 24"><path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="m8 13l2.32-1.16a2 2 0 0 0 .962-1.046L12 9l2.5.5l-2.176 2.611a2 2 0 0 1-.794.577L9.5 13.5zm0 0H4.963a.5.5 0 0 1-.499-.461L4 6.5M9 13v8M7 7l13 4m-3-6a2 2 0 1 1-4 0a2 2 0 0 1 4 0"/></svg><div class="n"><b>2</b>/2</div></div>
+</div>
+<div class="foot">Wed 2 Sep</div>

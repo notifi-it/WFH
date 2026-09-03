@@ -265,6 +265,21 @@ static void tick_task(void *arg) {
             }
         } else {
             lock_misses = 0;
+
+            // Out of hours — from the last window closing (work end + grace)
+            // to work start — the grid gives way to the tally (§7.8). Acted
+            // on at the transition only, so a tap that peeks at the grid is
+            // not undone a second later.
+            struct tm tm;
+            localtime_r(&now, &tm);
+            const bool off = now >= wfh_at_time(&tm, g_settings.work_end) + g_settings.grace_min * 60
+                          || now <  wfh_at_time(&tm, g_settings.work_start);
+            static int off_was = -1;
+            if (off != off_was) {
+                off_was = off;
+                if (off) ui_show_dayend(); else ui_show_grid();
+            }
+
             const int was = g_card.len;
             card_sync(&g_card, g_view.due, g_view.n_due, &g_settings, now, ui_card_host());
 
@@ -297,7 +312,7 @@ void app_main(void) {
     // to completion — and is stopped — while the panel is still unpowered.
     // Costs a few dark seconds at boot; the alternative was a
     // panel that tore into white bands every time the radio keyed up.
-    wifi_time_sync(g_settings.wifi_ssid, g_settings.wifi_pass, 30);
+    wifi_time_sync(g_settings.wifi_ssid, g_settings.wifi_pass, 60);
 
     ESP_ERROR_CHECK(panel_power_up());
 

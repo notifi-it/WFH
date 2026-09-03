@@ -80,6 +80,11 @@ static lv_obj_t *g_confirm, *g_confirm_label;
 static lv_obj_t *g_hist, *g_hist_icon, *g_hist_name, *g_hist_sub, *g_hist_list;
 static int       g_hist_action = -1;
 
+// End of day (§7.8): the tally, from the last window closing until work
+// starts again. Tapping anywhere peeks at the grid.
+static lv_obj_t *g_dayend, *g_dayend_sub, *g_dayend_date;
+static lv_obj_t *g_dayend_icon[ACTIONS_MAX], *g_dayend_n[ACTIONS_MAX];
+
 // The popup is one screen reused for whichever tile was tapped.
 static int       g_popup_action = -1;
 static lv_obj_t *g_pop_name, *g_pop_blurb, *g_pop_next_lbl, *g_pop_next,
@@ -961,6 +966,73 @@ void ui_refresh(void) {
     if (lv_screen_active() == g_popup) popup_refresh();
 }
 
+// ----------------------------------------------------------------- day end
+
+static void on_dayend_tap(lv_event_t *e) { LV_UNUSED(e); ui_show_grid(); }
+
+/** Transcribed from design/dayend-v4.html: title, "Back at HH:MM", a 3x2
+ *  tally of icon + done/target in each action's tint, the date at the foot. */
+static void build_dayend(void) {
+    g_dayend = lv_obj_create(NULL);
+    lv_obj_set_style_text_font(g_dayend, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_bg_color(g_dayend, lv_color_hex(PAGE_BG), 0);
+    lv_obj_clear_flag(g_dayend, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(g_dayend, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_event_cb(g_dayend, on_dayend_tap, LV_EVENT_CLICKED, NULL);
+
+    lv_obj_t *title = lv_label_create(g_dayend);
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_set_style_text_color(title, lv_color_hex(COL_TEXT), 0);
+    lv_label_set_text(title, "See you tomorrow");
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 52);
+
+    g_dayend_sub = lv_label_create(g_dayend);
+    lv_obj_set_style_text_color(g_dayend_sub, lv_color_hex(0x787e83), 0);   // 50%
+    lv_obj_align(g_dayend_sub, LV_ALIGN_TOP_MID, 0, 94);
+
+    // Three columns of CONTENT_W / 3, two rows 28px apart below 40px icons.
+    const int col_w = CONTENT_W / 3;
+    for (int i = 0; i < g_settings.n_actions && i < 6; i++) {
+        const int cx = MARGIN + col_w / 2 + (i % 3) * col_w - PANEL_W / 2;   // relative to TOP_MID
+        const int top = 150 + (i / 3) * (40 + 6 + 20 + 28);
+
+        g_dayend_icon[i] = lv_image_create(g_dayend);
+        lv_image_set_src(g_dayend_icon[i], ICON[i]);
+        lv_image_set_scale(g_dayend_icon[i], 160);                 // 64px art at 40px
+        lv_obj_set_style_image_recolor_opa(g_dayend_icon[i], LV_OPA_COVER, 0);
+        lv_obj_set_style_image_recolor(g_dayend_icon[i], lv_color_hex(TINT[i]), 0);
+        // The image object keeps its 64px box; the 40px art is centred in
+        // it, so the box starts 12px above where the art should.
+        lv_obj_align(g_dayend_icon[i], LV_ALIGN_TOP_MID, cx, top - 12);
+
+        g_dayend_n[i] = lv_label_create(g_dayend);
+        lv_obj_set_style_text_font(g_dayend_n[i], &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(g_dayend_n[i], lv_color_hex(0x787e83), 0);
+        lv_label_set_recolor(g_dayend_n[i], true);
+        lv_obj_align(g_dayend_n[i], LV_ALIGN_TOP_MID, cx, top + 40 + 6);
+    }
+
+    g_dayend_date = lv_label_create(g_dayend);
+    lv_obj_set_style_text_color(g_dayend_date, lv_color_hex(0x5a6066), 0);   // 35%
+    lv_obj_align(g_dayend_date, LV_ALIGN_BOTTOM_MID, 0, -28);
+}
+
+void ui_show_dayend(void) {
+    lv_label_set_text_fmt(g_dayend_sub, "Back at %s", g_settings.work_start);
+    for (int i = 0; i < g_settings.n_actions && i < 6; i++) {
+        lv_label_set_text_fmt(g_dayend_n[i], "#%06lx %d#/%d",
+                              (unsigned long)TINT[i], g_view.counts[i], g_settings.actions[i].target);
+    }
+    const time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    char wday[8], mon[8];
+    strftime(wday, sizeof wday, "%a", &tm);
+    strftime(mon, sizeof mon, "%b", &tm);
+    lv_label_set_text_fmt(g_dayend_date, "%s %d %s", wday, tm.tm_mday, mon);
+    if (lv_screen_active() != g_dayend) lv_screen_load_anim(g_dayend, LV_SCR_LOAD_ANIM_FADE_IN, 300, 0, false);
+}
+
 void ui_show_grid(void) {
     if (lv_screen_active() != g_grid) {
         lv_screen_load_anim(g_grid, LV_SCR_LOAD_ANIM_FADE_IN, 200, 0, false);
@@ -1079,6 +1151,7 @@ void ui_build(void) {
     build_card();
     build_popup();
     build_history();
+    build_dayend();
     build_flow();
     ui_refresh();
     lv_timer_create(wave_cb, 33, NULL);
