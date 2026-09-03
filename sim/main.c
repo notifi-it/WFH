@@ -178,6 +178,7 @@ int main(int argc, char **argv) {
     if (strcmp(screen, "stretch") == 0) ui_show_stretch(5);
     if (strcmp(screen, "rollflow") == 0) ui_show_stretch(2);
     if (strcmp(screen, "history") == 0) ui_show_history(1);   // water
+    if (strcmp(screen, "dayend") == 0) ui_show_dayend();
     if (strcmp(screen, "card") == 0) {                       // 3-way collision
         g_card.rows[0] = (card_row_t){ .action = 0, .checked = true  };
         g_card.rows[1] = (card_row_t){ .action = 1, .checked = true  };

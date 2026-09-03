@@ -51,3 +51,9 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # Sub-pixel line coordinates: the waterline is a polyline, and on integer
 # points its crest steps in whole pixels.
 CONFIG_LV_USE_FLOAT=y
+
+# SNTP: three servers cycled on retry, no random start-up delay. The sync
+# window runs before the panel powers, so every second it takes is a dark
+# screen and every miss is a day logged under the build-time seed.
+CONFIG_LWIP_SNTP_MAX_SERVERS=3
+# CONFIG_LWIP_SNTP_STARTUP_DELAY is not set

@@ -7,6 +7,7 @@
 #   make stretch    render the guided stretch flow
 #   make rollflow   render the single-step flow (shoulder roll)
 #   make history    render one action's day (water)
+#   make dayend     render the end-of-day tally
 #
 # Compiles ui.c unchanged. The stubs/ directory supplies just enough of
 # ESP-IDF and the BSP for it to link off-target, so the simulator cannot
@@ -35,5 +36,7 @@ rollflow: board
 	./board rollflow.png rollflow
 history: board
 	./board history.png history
+dayend: board
+	./board dayend.png dayend
 clean:
-	rm -f board grid.png popup.png card.png stretch.png rollflow.png history.png
+	rm -f board grid.png popup.png card.png stretch.png rollflow.png history.png dayend.png

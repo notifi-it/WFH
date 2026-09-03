@@ -642,6 +642,10 @@ The snapshot shape is the contract a future web version would implement against:
 }
 ```
 
+
+### 7.8 End of day
+
+From the moment the last window can no longer be open (work end plus the grace, 18:30 on the default schedule) until work start, the grid gives way to the tally: "See you tomorrow", "Back at 09:00", the six actions in their tints with done over target, and the date. Nothing is due in that span, so nothing prompts. The tick raises it at the transition only; a tap anywhere peeks at the grid, which then stays until the next transition. `design/dayend-v4.html`.
 ### 8.1 Why WiFi survives the cut
 
 With no client, the radio earns its place on one job: **NTP**. A board that has never seen network time — and whose RTC backup is flat — has a wrong date, and a wrong date silently writes events under the wrong day key. That is the one failure here that corrupts data rather than merely annoying you.
@@ -649,7 +653,7 @@ With no client, the radio earns its place on one job: **NTP**. A board that has 
 How it runs (`wifi_time.c`):
 
 - The clock is seeded from the build time if the RTC is unset, so a board with no network still has a plausible date.
-- SNTP runs in `app_main`, blocking, **before `panel_power_up()`**. The WiFi radio and the QSPI panel cannot be alive at the same time: with the radio up the panel tears into white bands and freezes. The screen stays dark for the few seconds the sync takes.
+- SNTP runs in `app_main`, blocking, **before `panel_power_up()`**. The WiFi radio and the QSPI panel cannot be alive at the same time: with the radio up the panel tears into white bands and freezes. The screen stays dark for the few seconds the sync takes. Three servers (pool.ntp.org, time.google.com, time.cloudflare.com) are cycled on retry and the window is 60s: on this weak link one lost packet to a single server used to cost the whole window, and a board that misses its sync runs the day on the build-time seed.
 - The radio is then **stopped, not deinitialised**. `esp_wifi_deinit()` frees driver RAM that the panel bring-up reuses, and the driver's teardown then writes over LVGL's tick mutex (CLAUDE.md).
 - Credentials come from gitignored `config/secrets.json`, generated into gitignored `firmware/main/wifi.g.h` by `tools/gen-config.mjs`. A checkout without secrets builds and runs offline on the build-time seed.
 
